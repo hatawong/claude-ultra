@@ -1,0 +1,36 @@
+[package]
+name = "claude-ultra-http"
+version = "1.1.0"
+edition = "2021"
+description = "HTTP client with BoringSSL TLS"
+
+[dependencies]
+boring = "5"
+tokio-boring = "5"
+hyper-boring = "5.0.0-alpha.3"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio", "http1"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+tokio = { version = "1", features = ["net", "io-util", "time", "macros", "rt-multi-thread"] }
+base64 = "0.22"
+tracing = "0.1"
+async-compression = { version = "0.4", features = ["tokio", "gzip", "deflate", "brotli"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+pin-project-lite = "0.2"
+sha2 = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+
+[features]
+internal = []
+
+[dev-dependencies]
+serde_json = "1"
+dirs = "5.0"
+uuid = { version = "1", features = ["v4"] }
+futures-util = "0.3"

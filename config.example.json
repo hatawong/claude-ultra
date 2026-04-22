@@ -1,0 +1,22 @@
+{
+  "ui": {
+    "language": "en",
+    "theme": "dark"
+  },
+  "server_url": "https://api.claude-ultra.com",
+  "gateway": {
+    "port": 9000,
+    "api_key": "",
+    "auto_start": true,
+    "enable_logging": false
+  },
+  "proxy": {
+    "default_type": "residential",
+    "residential": {
+      "host": "geo.iproyal.com",
+      "port": 12321,
+      "username": "",
+      "password": ""
+    }
+  }
+}

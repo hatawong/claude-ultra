@@ -1,0 +1,55 @@
+name: Build Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.94.1
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: TypeScript check
+        run: bunx tsc --noEmit
+
+      - name: Prepare Tauri build dirs
+        run: mkdir -p dist src-tauri/gen/schemas
+
+      - name: Cargo check
+        working-directory: src-tauri
+        run: cargo check --lib
+
+      - name: Cargo test (lib unit tests)
+        working-directory: src-tauri
+        run: cargo test --lib
+
+      - name: Cargo test (integration)
+        working-directory: src-tauri
+        run: cargo test --test header_order

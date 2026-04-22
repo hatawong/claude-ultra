@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en" style="background-color: #15191e;">
+
+<head>
+  <meta charset="UTF-8" />
+  <link rel="icon" type="image/png" href="/icon.png" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Ultra</title>
+  <script>
+    (function () {
+      try {
+        const savedTheme = localStorage.getItem('app-theme-preference');
+        const systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+        // Default to dark when no preference saved
+        const shouldBeDark = !savedTheme || savedTheme === 'dark' || (savedTheme === 'system' && systemDark);
+
+        document.documentElement.style.backgroundColor = '#15191e';
+
+        if (shouldBeDark) {
+          document.documentElement.classList.add('dark');
+          document.documentElement.setAttribute('data-theme', 'dark');
+        } else {
+          document.documentElement.classList.remove('dark');
+          document.documentElement.setAttribute('data-theme', 'light');
+        }
+      } catch (e) {
+        console.error('Failed to apply theme during boot:', e);
+        document.documentElement.style.backgroundColor = '#15191e';
+      }
+    })();
+  </script>
+  <style>
+    html {
+      background-color: #15191e !important;
+    }
+
+    body {
+      margin: 0;
+      background-color: transparent;
+    }
+  </style>
+</head>
+
+<body style="margin: 0; background-color: #15191e;">
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+</body>
+
+</html>

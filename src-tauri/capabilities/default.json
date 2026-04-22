@@ -1,0 +1,26 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:window:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-set-background-color",
+    "core:window:allow-set-size",
+    "core:window:allow-center",
+    "core:window:allow-show",
+    "opener:default",
+    "dialog:default",
+    "fs:default",
+    "core:event:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
+    "window-state:default",
+    "process:allow-restart",
+    "process:allow-exit",
+    "updater:default"
+  ]
+}
