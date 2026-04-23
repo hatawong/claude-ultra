@@ -452,6 +452,7 @@ mod tests {
     // ── gate (public API) ──
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_gate_passes_through_safe_version() {
         let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.111.b2b; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
         let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
@@ -464,6 +465,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_gate_passes_through_old_version() {
         let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.97.d5e; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
         let p = gate(body, Some("claude-cli/2.1.97 (external, cli)")).unwrap();
@@ -475,6 +477,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_gate_adjusts_newer_version() {
         let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.200.bf1; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
         let p = gate(body, Some("claude-cli/2.1.200 (external, cli)")).unwrap();
@@ -502,6 +505,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_gate_messages_isolation() {
         let body = br#"{"messages":[{"role":"user","content":"cc_version=2.1.109;"}],"system":[{"type":"text","text":"cc_version=2.1.111.b07; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
         let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
@@ -538,6 +542,7 @@ mod tests {
     // ── normalization ──
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_gate_normalizes_invalid_value() {
         let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.111.b2b; cch=ZZZZZ;"}]}"#;
         let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
@@ -546,6 +551,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_gate_normalizes_non_ascii_value() {
         let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.111.b2b; cch=\u4f60\u597d\u554a;"}]}"#;
         let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
@@ -568,6 +574,7 @@ mod tests {
     // ── version adjustment ──
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_gate_output_varies_with_input() {
         // fp("Write a hello world in Python", "2.1.111")="3db"
         let body = br#"{"messages":[{"role":"user","content":"Write a hello world in Python"}],"system":[{"type":"text","text":"cc_version=2.1.111.3db; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
@@ -594,6 +601,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_gate_output_adjusted_on_version_change() {
         let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.200.bf1; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
         let p = gate(body, Some("claude-cli/2.1.200 (external, cli)")).unwrap();
@@ -604,6 +612,7 @@ mod tests {
     // ── find_verified_user_text ──
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_fp_real_scenario_sr_blocks_then_prompt() {
         let body = serde_json::json!({
             "messages": [{"role": "user", "content": [
@@ -617,6 +626,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_fp_real_scenario_sr_blocks_then_long_prompt() {
         let body = serde_json::json!({
             "messages": [{"role": "user", "content": [
@@ -629,6 +639,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_fp_string_content() {
         let body = serde_json::json!({
             "messages": [{"role": "user", "content": "hi"}]
@@ -651,6 +662,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_fp_second_message_matches() {
         let body = serde_json::json!({
             "messages": [
@@ -667,6 +679,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_fp_4_blocks_match_last() {
         let long_msg = "Write a comprehensive guide to building REST APIs with Rust using the Axum framework";
         assert_eq!(compute_fp(long_msg, "2.1.111"), "853");
@@ -693,6 +706,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "internal")]
     fn test_fp_empty_string_fallback() {
         let body = serde_json::json!({
             "messages": [{"role": "user", "content": [
