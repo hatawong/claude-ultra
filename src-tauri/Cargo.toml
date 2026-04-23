@@ -1,6 +1,6 @@
 [package]
 name = "claude-ultra-manager"
-version = "1.2.117"
+version = "1.2.118"
 description = "Claude Ultra Manager"
 authors = ["Claude Ultra"]
 edition = "2021"
