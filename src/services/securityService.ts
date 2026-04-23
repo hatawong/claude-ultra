@@ -13,6 +13,10 @@ export interface GatewayConnectionInfo {
   enableLogging: boolean;
   lanIp: string | null;
   activeAccounts: number;
+  // internal-only (absent on default builds)
+  transparentEnabled?: boolean;
+  transparentPort?: number;
+  transparentRunning?: boolean;
 }
 
 export interface SecurityConfig {
@@ -83,6 +87,8 @@ export async function updateGatewayConfig(config: {
   bindAddress?: string;
   port?: number;
   apiKey?: string;
+  transparentEnabled?: boolean;
+  transparentPort?: number;
 }): Promise<string> {
   return invoke<string>('update_gateway_config', { request: config });
 }

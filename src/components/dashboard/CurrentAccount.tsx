@@ -114,7 +114,7 @@ function RecommendedAccount({ accounts }: RecommendedAccountProps) {
               defaultReset="5h"
             />
             <QuotaBar
-              label="Weekly (7 day)"
+              label="Weekly (7d)"
               utilization={best.utilization?.seven_day?.utilization}
               resetsAt={best.utilization?.seven_day?.resets_at}
               defaultReset="7d"

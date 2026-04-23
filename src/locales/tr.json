@@ -245,6 +245,8 @@
             "cli": "CLI İstemcisi",
             "device": "Cihaz",
             "carrier": "Operatör",
+            "country": "Ülke",
+            "country_updated": "Ülke güncellendi",
             "last_activity": "Son Aktivite",
             "login": "Giriş",
             "keepalive": "Canlı Tutma",
@@ -262,7 +264,8 @@
             "delete_account": "Hesabı Sil",
             "oauth_reauth": "OAuth Yeniden Yetkilendirme",
             "proxy_country": "Ülke",
-            "proxy_region": "Bölge"
+            "proxy_region": "Bölge",
+            "route_updated": "Yol güncellendi"
         },
         "toast": {
             "proxy_enabled": "{{count}} hesap için proxy etkinleştirildi",
@@ -344,7 +347,8 @@
             "last_used": "Son Kullanım",
             "actions": "İşlemler",
             "proxy": "Proxy",
-            "last_activity": "Son Aktivite"
+            "last_activity": "Son Aktivite",
+            "route": "Yol"
         },
         "drag_to_reorder": "Yeniden sıralamak için sürükleyin",
         "empty": {
@@ -415,7 +419,12 @@
         },
         "refresh_confirm_title": "Kotaları Yenile",
         "refresh_confirm_all": "CLI kimlik bilgisi olan {{count}} hesabın kotasını yenilensin mi?",
-        "refresh_confirm_selected": "Seçilen {{count}} hesabın kotası yenilensin mi?"
+        "refresh_confirm_selected": "Seçilen {{count}} hesabın kotası yenilensin mi?",
+        "route": {
+            "proxy": "Proxy",
+            "direct": "Doğrudan",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "Ayarları Kaydet",
@@ -1034,6 +1043,16 @@
             "placeholder": "(API Anahtarı ile aynı)",
             "hint": "Docker/Web dağıtımı için. API anahtarı güvenliğini artırmak için ayrı bir giriş parolası belirleyin."
         },
+        "transparent": {
+            "title": "Şeffaf denetim portu",
+            "description": "Etkinleştirildiğinde bu porttaki tüm istekler Anthropic'e olduğu gibi iletilir; yalnızca loglanır, değiştirilmez.",
+            "port_label": "Port",
+            "port_hint": "Yalnızca localhost. Uygulamak için gateway'i yeniden başlatın.",
+            "bound_to": "Bağlı",
+            "internal_badge": "Yalnızca iç yapı",
+            "status_running": "Çalışıyor",
+            "status_stopped": "Durduruldu"
+        },
         "cli_sync": {
             "title": "CLI Yapılandırma Senkronizasyonu",
             "desc": "API uç noktasını ve anahtarı yerel Claude Code CLI'nize hızlıca senkronize edin.",
@@ -1046,6 +1065,15 @@
             "synced": "Senkronize Edildi",
             "sync_now": "Şimdi Senkronize Et",
             "lan_snippet": "LAN settings.json kod parçacığı"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "Test Et",
+            "connected": "Bağlı",
+            "not_configured": "Yapılandırılmadı",
+            "test_failed": "Başarısız",
+            "not_tested": "Test edilmedi"
         }
     },
     "errors": {
@@ -1064,6 +1092,7 @@
         "paused": "Duraklatıldı",
         "done": "Tamamlandı",
         "failed": "Başarısız",
+        "aborted": "İptal edildi",
         "pause": "Duraklat",
         "resume": "Devam Et",
         "abort": "İptal",

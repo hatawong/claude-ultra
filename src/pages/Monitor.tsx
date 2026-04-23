@@ -415,7 +415,9 @@ function Monitor() {
                   <td className="py-1.5 px-3 text-left">
                     <div className="text-[10px] leading-relaxed">
                       <div>{formatTokens(log.output_tokens)}</div>
-                      <div>&nbsp;</div>
+                      {(log.cache_creation_tokens != null && log.cache_creation_tokens > 0) ? (
+                        <div className="text-gray-400">{t('monitor.table.cache_read', 'Cache')}: {formatTokens(log.cache_creation_tokens)}</div>
+                      ) : <div>&nbsp;</div>}
                     </div>
                   </td>
                   <td className={`py-1.5 px-3 text-right text-[10px] ${(log.total_cost ?? 0) > 5 ? 'text-red-500 font-bold' : 'text-green-600 dark:text-green-400'}`}>{formatCost(log.total_cost)}</td>

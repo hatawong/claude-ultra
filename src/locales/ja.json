@@ -236,6 +236,8 @@
             "cli": "CLIクライアント",
             "device": "デバイス",
             "carrier": "キャリア",
+            "country": "国",
+            "country_updated": "国を更新しました",
             "last_activity": "最終活動",
             "login": "ログイン",
             "keepalive": "キープアライブ",
@@ -253,7 +255,8 @@
             "delete_account": "アカウント削除",
             "oauth_reauth": "OAuth再認証",
             "proxy_country": "国",
-            "proxy_region": "地域"
+            "proxy_region": "地域",
+            "route_updated": "ルートを更新しました"
         },
         "toast": {
             "proxy_enabled": "{{count}} 個のアカウントのプロキシを有効にしました",
@@ -335,7 +338,8 @@
             "last_used": "最終使用",
             "actions": "操作",
             "proxy": "プロキシ",
-            "last_activity": "最終活動"
+            "last_activity": "最終活動",
+            "route": "ルート"
         },
         "drag_to_reorder": "ドラッグして並べ替え",
         "empty": {
@@ -378,7 +382,12 @@
         "max": "Max",
         "refresh_confirm_title": "クォータ更新",
         "refresh_confirm_all": "CLI認証情報のある {{count}} 件のアカウントのクォータを更新しますか？",
-        "refresh_confirm_selected": "選択した {{count}} 件のアカウントのクォータを更新しますか？"
+        "refresh_confirm_selected": "選択した {{count}} 件のアカウントのクォータを更新しますか？",
+        "route": {
+            "proxy": "プロキシ",
+            "direct": "直接",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "設定を保存",
@@ -976,6 +985,16 @@
             "placeholder": "（APIキーと同じ）",
             "hint": "Docker/Webデプロイ用。独立パスワードでセキュリティ向上。"
         },
+        "transparent": {
+            "title": "透過監査ポート",
+            "description": "有効にすると、このポート上のすべてのリクエストは変更されずに Anthropic へ透過的に転送され、ログのみ記録されます。",
+            "port_label": "ポート",
+            "port_hint": "ローカルホストのみ。ゲートウェイを再起動して適用します。",
+            "bound_to": "バインド先",
+            "internal_badge": "内部ビルド限定",
+            "status_running": "稼働中",
+            "status_stopped": "停止中"
+        },
         "cli_sync": {
             "title": "CLI設定同期",
             "desc": "APIエンドポイントとキーをClaude Code CLIに同期。",
@@ -988,6 +1007,15 @@
             "synced": "同期完了",
             "sync_now": "今すぐ同期",
             "lan_snippet": "LAN settings.json 設定"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "テスト",
+            "connected": "接続済み",
+            "not_configured": "未設定",
+            "test_failed": "失敗",
+            "not_tested": "未テスト"
         }
     },
     "task": {
@@ -997,6 +1025,7 @@
         "paused": "一時停止中",
         "done": "完了",
         "failed": "失敗",
+        "aborted": "中止",
         "pause": "一時停止",
         "resume": "再開",
         "abort": "中止",

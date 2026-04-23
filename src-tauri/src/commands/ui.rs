@@ -36,7 +36,9 @@ pub async fn get_claude_settings() -> Result<serde_json::Value, String> {
 }
 
 /// Sync gateway env vars into Claude Code settings.json.
-/// Merges into existing env — only overwrites ANTHROPIC_BASE_URL, ANTHROPIC_API_KEY, DISABLE_TELEMETRY.
+/// Merges into existing env — only overwrites the keys set here
+/// (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `DISABLE_TELEMETRY`,
+/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `ENABLE_PROMPT_CACHING_1H`).
 #[tauri::command]
 pub async fn sync_claude_settings(
     base_url: String,
@@ -69,6 +71,9 @@ pub async fn sync_claude_settings(
     env_obj.insert("ANTHROPIC_API_KEY".to_string(), serde_json::json!(api_key));
     env_obj.insert("DISABLE_TELEMETRY".to_string(), serde_json::json!("1"));
     env_obj.insert("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(), serde_json::json!("1"));
+    // Force CLI to mark cache_control entries with ttl="1h" regardless of
+    // auth mode. Large sessions evict quickly on the default 5m TTL.
+    env_obj.insert("ENABLE_PROMPT_CACHING_1H".to_string(), serde_json::json!("1"));
 
     // Atomic write + 0600: settings.json contains ANTHROPIC_API_KEY
     crate::modules::secure_fs::secure_write_json(&path, &settings)?;

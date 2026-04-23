@@ -6,7 +6,7 @@ use claude_ultra_http::compute_fp;
 use semver::Version;
 use serde_json::Value;
 
-pub const MAX_SUPPORTED_VERSION: &str = "2.1.114";
+pub const MAX_SUPPORTED_VERSION: &str = "2.1.117";
 
 fn clamp_user_agent(original_ua: &str, original_version: &Version, target_version: &str) -> String {
     let version_str = format!("{}", original_version);
@@ -452,6 +452,43 @@ mod tests {
     // ── gate (public API) ──
 
     #[test]
+    fn test_gate_passes_through_safe_version() {
+        let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.111.b2b; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
+        let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
+        assert!(!p.was_clamped());
+        let text = p.value["system"][0]["text"].as_str().unwrap();
+        assert!(text.contains("cch=00000"));
+        // fp recomputed: "hi" → chars="000" + version "2.1.111" → fp="b2b"
+        assert!(text.contains("cc_version=2.1.111.b2b"), "fp recomputed, got: {}", text);
+        assert_eq!(p.version, Version::new(2, 1, 111));
+    }
+
+    #[test]
+    fn test_gate_passes_through_old_version() {
+        let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.97.d5e; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
+        let p = gate(body, Some("claude-cli/2.1.97 (external, cli)")).unwrap();
+        assert!(!p.was_clamped());
+        let text = p.value["system"][0]["text"].as_str().unwrap();
+        assert!(text.contains("cch=00000"));
+        assert!(text.contains("cc_version=2.1.97.d5e"), "fp recomputed for 2.1.97");
+        assert_eq!(p.version, Version::new(2, 1, 97));
+    }
+
+    #[test]
+    fn test_gate_adjusts_newer_version() {
+        let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.200.bf1; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
+        let p = gate(body, Some("claude-cli/2.1.200 (external, cli)")).unwrap();
+        assert!(p.was_clamped());
+        assert_eq!(p.ua_override.as_deref(), Some("claude-cli/2.1.117 (external, cli)"));
+        let text = p.value["system"][0]["text"].as_str().unwrap();
+        // fp recomputed with clamped version
+        assert!(text.contains("cc_version=2.1.117."), "clamped to MAX, got: {}", text);
+        assert!(text.contains("cch=00000"));
+        assert!(!text.contains("2.1.200"));
+        assert_eq!(p.version, Version::new(2, 1, 117));
+    }
+
+    #[test]
     fn test_gate_mismatch_rejects() {
         let body = br#"{"system":[{"type":"text","text":"cc_version=2.1.110.610; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
         let err = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap_err();
@@ -462,6 +499,13 @@ mod tests {
     fn test_gate_no_top_level_system_rejects() {
         let body = br#"{"messages":[{"role":"user","content":"cc_version=2.1.109;"}]}"#;
         assert_eq!(gate(body, None).unwrap_err(), VersionError::NotFound);
+    }
+
+    #[test]
+    fn test_gate_messages_isolation() {
+        let body = br#"{"messages":[{"role":"user","content":"cc_version=2.1.109;"}],"system":[{"type":"text","text":"cc_version=2.1.111.b07; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
+        let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
+        assert_eq!(p.version, Version::new(2, 1, 111));
     }
 
     #[test]
@@ -491,6 +535,24 @@ mod tests {
         assert_eq!(gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap_err(), VersionError::NotFound);
     }
 
+    // ── normalization ──
+
+    #[test]
+    fn test_gate_normalizes_invalid_value() {
+        let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.111.b2b; cch=ZZZZZ;"}]}"#;
+        let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
+        let text = p.value["system"][0]["text"].as_str().unwrap();
+        assert!(text.contains("cch=00000"), "non-hex cch overwritten");
+    }
+
+    #[test]
+    fn test_gate_normalizes_non_ascii_value() {
+        let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.111.b2b; cch=\u4f60\u597d\u554a;"}]}"#;
+        let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
+        let text = p.value["system"][0]["text"].as_str().unwrap();
+        assert!(text.contains("cch=00000"), "non-ascii cch overwritten");
+    }
+
     #[test]
     fn test_gate_rejects_missing_field() {
         let body = br#"{"system":[{"type":"text","text":"cch=xxxxx;"}]}"#;
@@ -501,6 +563,17 @@ mod tests {
     fn test_gate_rejects_missing_field_2() {
         let body = br#"{"system":[{"type":"text","text":"cc_version=2.1.111;"}]}"#;
         assert_eq!(gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap_err(), VersionError::NotFound);
+    }
+
+    // ── version adjustment ──
+
+    #[test]
+    fn test_gate_output_varies_with_input() {
+        // fp("Write a hello world in Python", "2.1.111")="3db"
+        let body = br#"{"messages":[{"role":"user","content":"Write a hello world in Python"}],"system":[{"type":"text","text":"cc_version=2.1.111.3db; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
+        let p = gate(body, Some("claude-cli/2.1.111 (external, cli)")).unwrap();
+        let text = p.value["system"][0]["text"].as_str().unwrap();
+        assert!(text.contains("cc_version=2.1.111.3db"), "fp recomputed from long prompt, got: {}", text);
     }
 
     #[test]
@@ -520,7 +593,48 @@ mod tests {
         assert!(matches!(err, VersionError::InvalidFormat(_)));
     }
 
+    #[test]
+    fn test_gate_output_adjusted_on_version_change() {
+        let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.200.bf1; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
+        let p = gate(body, Some("claude-cli/2.1.200 (external, cli)")).unwrap();
+        let text = p.value["system"][0]["text"].as_str().unwrap();
+        assert!(text.contains(&format!("cc_version={}.", MAX_SUPPORTED_VERSION)), "fp recomputed on clamp, got: {}", text);
+    }
+
     // ── find_verified_user_text ──
+
+    #[test]
+    fn test_fp_real_scenario_sr_blocks_then_prompt() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "<system-reminder>skills list here</system-reminder>"},
+                {"type": "text", "text": "<system-reminder>context here</system-reminder>"},
+                {"type": "text", "text": "hi"}
+            ]}]
+        });
+        let result = find_verified_user_text(&body, "2.1.111", "b2b");
+        assert_eq!(result, Some("hi".to_string()));
+    }
+
+    #[test]
+    fn test_fp_real_scenario_sr_blocks_then_long_prompt() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "<system-reminder>skills</system-reminder>"},
+                {"type": "text", "text": "Write a hello world in Python"}
+            ]}]
+        });
+        let result = find_verified_user_text(&body, "2.1.111", "3db");
+        assert_eq!(result, Some("Write a hello world in Python".to_string()));
+    }
+
+    #[test]
+    fn test_fp_string_content() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        assert_eq!(find_verified_user_text(&body, "2.1.111", "b2b"), Some("hi".to_string()));
+    }
 
     #[test]
     fn test_fp_no_match() {
@@ -537,6 +651,40 @@ mod tests {
     }
 
     #[test]
+    fn test_fp_second_message_matches() {
+        let body = serde_json::json!({
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "<system-reminder>sr</system-reminder>"},
+                    {"type": "text", "text": "first prompt that wont match"}
+                ]},
+                {"role": "assistant", "content": "response"},
+                {"role": "user", "content": "Write a hello world in Python"}
+            ]
+        });
+        let result = find_verified_user_text(&body, "2.1.111", "3db");
+        assert_eq!(result, Some("Write a hello world in Python".to_string()));
+    }
+
+    #[test]
+    fn test_fp_4_blocks_match_last() {
+        let long_msg = "Write a comprehensive guide to building REST APIs with Rust using the Axum framework";
+        assert_eq!(compute_fp(long_msg, "2.1.111"), "853");
+        assert_eq!(compute_fp("hi", "2.1.111"), "b2b");
+
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "<system-reminder>skills</system-reminder>"},
+                {"type": "text", "text": "<system-reminder>context</system-reminder>"},
+                {"type": "text", "text": "hi"},
+                {"type": "text", "text": long_msg}
+            ]}]
+        });
+        let result = find_verified_user_text(&body, "2.1.111", "853");
+        assert_eq!(result, Some(long_msg.to_string()));
+    }
+
+    #[test]
     fn test_fp_empty_fallback_does_not_mask_real_mismatch() {
         let body = serde_json::json!({
             "messages": [{"role": "user", "content": "hello world"}]
@@ -544,4 +692,13 @@ mod tests {
         assert_eq!(find_verified_user_text(&body, "2.1.111", "b2b"), None);
     }
 
+    #[test]
+    fn test_fp_empty_string_fallback() {
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "<system-reminder>only sr blocks</system-reminder>"}
+            ]}]
+        });
+        assert_eq!(find_verified_user_text(&body, "2.1.111", "b2b"), Some(String::new()));
+    }
 }

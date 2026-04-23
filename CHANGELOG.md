@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.2.117 — 2026-04-23
+
+### New Features
+
+- **Gateway routing strategy** — Each account can choose its routing mode (Proxy / Vercel / Direct); in Proxy mode, a country can be specified per account and the residential proxy binds to that country (US / JP / KR / PH); automatic fallback when the preferred route is unavailable
+
+### Improvements
+
+- **Claude Code CLI 2.1.117 support** — MAX_SUPPORTED_VERSION upgraded from 2.1.114
+- **Prompt cache hit rate** — Session ID handling fixes reduce cache misses in large sessions
+- **Audit logging** — Gateway now records request/response headers for diagnostics
+- **Startup & config robustness** — Start gateway with 0 accounts; LAN subnet whitelisting supports CIDR; IPv6 host bracketing; secure_fs credential files at 0600 permissions
+
+### Bug Fixes
+
+- Updater ACL fix (auto-update was broken in v1.1.x)
+- Stream intent preservation (no forced SSE)
+- Hop-by-hop header stripping
+- Multiple i18n locale entries
+
 ## v1.1.0 — 2026-04-18
 
 ### Security

@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { X, Copy, ChevronDown, ChevronUp } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import { invoke } from '@tauri-apps/api/core';
 import type { Account } from '../../types/account';
 import {
   getPlanLabel, getPlanBadgeClass, getAnomalyLabel,
@@ -8,6 +9,7 @@ import {
 } from '../../types/account';
 import { cn } from '../../utils/cn';
 import { QuotaDetail } from './QuotaDisplay';
+import { useConfigStore } from '../../stores/useConfigStore';
 
 interface AccountDetailsDialogProps {
   account: Account;
@@ -15,12 +17,13 @@ interface AccountDetailsDialogProps {
   onDelete: (account: Account) => void;
   onToggleProxy: (account: Account) => void;
   onToast: (msg: string) => void;
+  onUpdated?: () => void;
 }
 
 type TabId = 'overview' | 'proxy' | 'credentials' | 'anomaly';
 
 function AccountDetailsDialog({
-  account, onClose, onDelete, onToggleProxy, onToast,
+  account, onClose, onDelete, onToggleProxy, onToast, onUpdated,
 }: AccountDetailsDialogProps) {
   const { t } = useTranslation();
   const hasAnomaly = account.disabled || account.userDisabled;
@@ -82,7 +85,7 @@ function AccountDetailsDialog({
 
         {/* Content */}
         <div className="flex-1 overflow-y-auto px-6 py-4 text-sm">
-          {activeTab === 'overview' && <OverviewTab account={account} />}
+          {activeTab === 'overview' && <OverviewTab account={account} onToast={onToast} onUpdated={onUpdated} />}
           {activeTab === 'proxy' && <ProxyTab account={account} onToast={onToast} />}
           {activeTab === 'credentials' && <CredentialsTab account={account} onToast={onToast} />}
           {activeTab === 'anomaly' && <AnomalyTab account={account} onDelete={onDelete} onToggleProxy={onToggleProxy} onToast={onToast} />}
@@ -104,7 +107,7 @@ function AccountDetailsDialog({
 
 // ─── Overview Tab ───────────────────────────────────────────
 
-function OverviewTab({ account }: { account: Account }) {
+function OverviewTab({ account, onToast, onUpdated }: { account: Account; onToast: (msg: string) => void; onUpdated?: () => void }) {
   const { t } = useTranslation();
   const planLabel = getPlanLabel(account);
 
@@ -117,6 +120,9 @@ function OverviewTab({ account }: { account: Account }) {
         <InfoRow label="Plan" value={planLabel + (account.subscriptionRenewAt ? ` \u00b7 ${t('accounts.details.renews', 'Renews')} ${formatActivityTime(account.subscriptionRenewAt)}` : '')} />
         <InfoRow label={t('accounts.details.billing', 'Billing')} value={account.billingType || '\u2014'} />
         <InfoRow label={t('accounts.details.rate_limit', 'Rate Limit Tier')} value={account.rateLimitTier || '\u2014'} />
+        <InfoRow label={t('accounts.details.country', 'Country')} value={(account.country || account.region || '—').toUpperCase()} />
+        <span className="text-xs text-gray-500 whitespace-nowrap">{t('accounts.table.route', 'Route')}</span>
+        <RouteEditor account={account} onToast={onToast} onUpdated={onUpdated} />
       </InfoGrid>
 
       <SectionTitle text={t('accounts.details.quota_section', 'Quota')} />
@@ -268,9 +274,20 @@ function AnomalyTab({ account, onDelete, onToggleProxy, onToast }: {
   const anomaly = getAnomalyLabel(account);
   const notImplemented = () => onToast(t('common.coming_soon', 'Coming soon'));
 
-  const reason = account.disabledReason || account.userDisabledReason || '';
-  const isBanned = reason.toLowerCase().includes('banned') || reason.toLowerCase().includes('forbidden');
-  const isExpired = reason.toLowerCase().includes('invalid_grant') || reason.toLowerCase().includes('expired');
+  const rawReason = account.disabledReason || account.userDisabledReason || '';
+  const displayReason = (() => {
+    const match = rawReason.match(/^(HTTP \d+): (.+)$/s);
+    if (!match) return rawReason;
+    const [, prefix, body] = match;
+    try {
+      const json = JSON.parse(body);
+      const msg = json?.error?.message;
+      if (msg) return `${prefix}: ${msg}`;
+    } catch {}
+    return rawReason;
+  })();
+  const isBanned = rawReason.toLowerCase().includes('banned') || rawReason.toLowerCase().includes('forbidden') || rawReason.toLowerCase().includes('permission_error');
+  const isExpired = rawReason.toLowerCase().includes('invalid_grant') || rawReason.toLowerCase().includes('expired');
 
   return (
     <div className="space-y-4">
@@ -278,10 +295,10 @@ function AnomalyTab({ account, onDelete, onToggleProxy, onToast }: {
       <InfoGrid>
         <InfoRow label={t('accounts.details.anomaly_type', 'Type')} value={anomaly?.text || '\u2014'} />
         <InfoRow label={t('accounts.details.anomaly_time', 'Time')} value={(account.disabledAt || account.userDisabledAt) ? formatActivityTime(account.disabledAt || account.userDisabledAt!) : '\u2014'} />
-        <InfoRow label={t('common.reason', 'Reason')} value={reason || '\u2014'} />
+        <InfoRow label={t('common.reason', 'Reason')} value={displayReason || '\u2014'} />
       </InfoGrid>
 
-      {reason && (
+      {rawReason && (
         <>
           <div className="flex items-center justify-between">
             <SectionTitle text={t('accounts.details.raw_response', 'Raw Response')} />
@@ -294,8 +311,14 @@ function AnomalyTab({ account, onDelete, onToggleProxy, onToast }: {
             </button>
           </div>
           {rawExpanded && (
-            <pre className="text-[10px] bg-gray-50 dark:bg-base-200 p-3 rounded-lg overflow-x-auto text-gray-600 dark:text-gray-400 font-mono">
-              {reason}
+            <pre className="text-[10px] bg-gray-50 dark:bg-base-200 p-3 rounded-lg overflow-x-auto text-gray-600 dark:text-gray-400 font-mono whitespace-pre-wrap break-all">
+              {(() => {
+                const match = rawReason.match(/^(HTTP \d+): (.+)$/s);
+                if (!match) return rawReason;
+                const [, prefix, body] = match;
+                try { return `${prefix}:\n${JSON.stringify(JSON.parse(body), null, 2)}`; } catch {}
+                return rawReason;
+              })()}
             </pre>
           )}
         </>
@@ -385,6 +408,77 @@ function InfoRowCopyable({ label, value, onCopy }: { label: string; value: strin
         </button>
       </span>
     </>
+  );
+}
+
+const PROXY_COUNTRIES = ['us', 'jp', 'kr', 'ph'];
+
+function RouteEditor({ account, onToast, onUpdated }: { account: Account; onToast: (msg: string) => void; onUpdated?: () => void }) {
+  const { t } = useTranslation();
+  const config = useConfigStore((s) => s.config);
+  const proxyAvailable = !!config?.proxy?.residential?.username && !!config?.proxy?.residential?.password;
+  const vercelAvailable = !!config?.gateway?.vercel_api_key;
+
+  const currentMode = (account.routeMode || 'proxy').toLowerCase();
+  const currentCountry = (account.routeCountry || account.country || account.region || 'us').toLowerCase();
+  const [mode, setMode] = useState(currentMode);
+  const [country, setCountry] = useState(currentCountry);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => { setMode(currentMode); setCountry(currentCountry); }, [currentMode, currentCountry]);
+
+  const handleSave = async (newMode: string, newCountry?: string) => {
+    setMode(newMode);
+    if (newCountry !== undefined) setCountry(newCountry);
+    setSaving(true);
+    try {
+      await invoke('update_account_route', {
+        accountId: account.accountId,
+        routeMode: newMode,
+        ...(newMode === 'proxy' && newCountry !== undefined ? { routeCountry: newCountry } : {}),
+      });
+      onToast(t('accounts.details.route_updated', 'Route updated'));
+      onUpdated?.();
+    } catch (e) {
+      onToast(String(e));
+      setMode(currentMode);
+      setCountry(currentCountry);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-1.5">
+      <select
+        value={mode}
+        onChange={(e) => handleSave(e.target.value, country)}
+        disabled={saving}
+        className="text-xs bg-base-200 border border-base-300 rounded px-2 py-0.5 text-base-content focus:outline-none focus:ring-1 focus:ring-blue-500"
+      >
+        <option value="proxy" disabled={!proxyAvailable}>
+          {t('accounts.route.proxy', 'Proxy')}
+        </option>
+        <option value="vercel" disabled={!vercelAvailable}>
+          {t('accounts.route.vercel', 'Vercel')}
+        </option>
+        <option value="direct">
+          {t('accounts.route.direct', 'Direct')}
+        </option>
+      </select>
+      {mode === 'proxy' && (
+        <select
+          value={country}
+          onChange={(e) => handleSave(mode, e.target.value)}
+          disabled={saving}
+          className="text-xs bg-base-200 border border-base-300 rounded px-1.5 py-0.5 text-base-content focus:outline-none focus:ring-1 focus:ring-blue-500 w-16"
+        >
+          {PROXY_COUNTRIES.map((c) => (
+            <option key={c} value={c}>{c.toUpperCase()}</option>
+          ))}
+        </select>
+      )}
+    </div>
   );
 }
 

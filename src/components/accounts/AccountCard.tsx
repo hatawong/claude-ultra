@@ -42,7 +42,7 @@ function AccountCard({ account }: AccountCardProps) {
           {plan}
         </span>
         <span className="inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium bg-gray-100 dark:bg-gray-500/20 text-gray-600 dark:text-gray-400">
-          {account.region}
+          {(account.country || account.region || 'us').toUpperCase()}
         </span>
       </div>
 

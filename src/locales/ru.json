@@ -250,6 +250,8 @@
             "cli": "CLI-клиент",
             "device": "Устройство",
             "carrier": "Оператор",
+            "country": "Страна",
+            "country_updated": "Страна обновлена",
             "last_activity": "Последняя активность",
             "login": "Вход",
             "keepalive": "Поддержание связи",
@@ -267,7 +269,8 @@
             "delete_account": "Удалить аккаунт",
             "oauth_reauth": "Повторная авторизация OAuth",
             "proxy_country": "Страна",
-            "proxy_region": "Регион"
+            "proxy_region": "Регион",
+            "route_updated": "Маршрут обновлён"
         },
         "toast": {
             "proxy_enabled": "Включен прокси для {{count}} аккаунтов",
@@ -349,7 +352,8 @@
             "last_used": "Последнее использование",
             "actions": "Действия",
             "proxy": "Прокси",
-            "last_activity": "Последняя активность"
+            "last_activity": "Последняя активность",
+            "route": "Маршрут"
         },
         "drag_to_reorder": "Перетащите для изменения порядка",
         "empty": {
@@ -415,7 +419,12 @@
         },
         "refresh_confirm_title": "Обновить квоты",
         "refresh_confirm_all": "Обновить квоты для всех {{count}} аккаунтов с CLI-учётными данными?",
-        "refresh_confirm_selected": "Обновить квоты для {{count}} выбранных аккаунтов?"
+        "refresh_confirm_selected": "Обновить квоты для {{count}} выбранных аккаунтов?",
+        "route": {
+            "proxy": "Прокси",
+            "direct": "Прямое",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "Сохранить настройки",
@@ -1034,6 +1043,16 @@
             "placeholder": "(Совпадает с API-ключом)",
             "hint": "Для развертывания Docker/Web. Установите отдельный пароль для повышения безопасности API-ключа."
         },
+        "transparent": {
+            "title": "Прозрачный аудит-порт",
+            "description": "Если включено, все запросы на этом порту передаются в Anthropic без изменений и только логируются.",
+            "port_label": "Порт",
+            "port_hint": "Только localhost. Перезапустите шлюз для применения.",
+            "bound_to": "Привязано к",
+            "internal_badge": "Только внутренняя сборка",
+            "status_running": "Запущено",
+            "status_stopped": "Остановлено"
+        },
         "cli_sync": {
             "title": "Синхронизация CLI",
             "desc": "Быстрая синхронизация API-адреса и ключа с вашим локальным CLI Claude Code.",
@@ -1046,6 +1065,15 @@
             "synced": "Синхронизировано",
             "sync_now": "Синхронизировать",
             "lan_snippet": "Фрагмент settings.json для LAN"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "Тест",
+            "connected": "Подключено",
+            "not_configured": "Не настроено",
+            "test_failed": "Ошибка",
+            "not_tested": "Не проверено"
         }
     },
     "errors": {
@@ -1064,6 +1092,7 @@
         "paused": "Приостановлено",
         "done": "Готово",
         "failed": "Ошибка",
+        "aborted": "Прервано",
         "pause": "Пауза",
         "resume": "Продолжить",
         "abort": "Прервать",

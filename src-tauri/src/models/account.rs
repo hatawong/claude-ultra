@@ -131,6 +131,10 @@ fn default_manual() -> String {
     "manual".to_string()
 }
 
+fn default_route_mode() -> String {
+    "proxy".to_string()
+}
+
 /// Account V3 — unified data structure for all account lifecycle stages.
 /// Compatible with V1 JSON (missing fields use serde defaults).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,9 +153,17 @@ pub struct Account {
     #[serde(default)]
     pub org_id: String,
     #[serde(default)]
-    pub region: String,
+    pub country: Option<String>,
     #[serde(default)]
     pub created_at: i64,
+
+    // ── Routing (per-account) ───────────────
+    /// Routing mode: "proxy" (default) | "direct" | "vercel"
+    #[serde(default = "default_route_mode")]
+    pub route_mode: String,
+    /// Target country for proxy mode. None = fallback to self.country.
+    #[serde(default)]
+    pub route_country: Option<String>,
 
     // ── Plan ─────────────────────────────────
     #[serde(default = "default_free")]
@@ -194,6 +206,27 @@ impl Account {
     #[allow(dead_code)]
     pub fn is_proxy_available(&self) -> bool {
         !self.disabled && !self.user_disabled && self.cli.is_some()
+    }
+
+    /// Resolve effective target country for proxy routing.
+    /// Precedence: `route_country` (explicit override) → `country` → "us".
+    /// Returns ISO 3166-1 alpha-2 lowercase.
+    pub fn resolve_proxy_country(&self) -> String {
+        self.route_country.as_deref()
+            .or(self.country.as_deref())
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "us".to_string())
+    }
+
+    pub fn resolve_country(&self) -> String {
+        if let Some(ref c) = self.country {
+            let trimmed = c.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_lowercase();
+            }
+        }
+        "us".to_string()
     }
 }
 
@@ -240,6 +273,9 @@ fn get_accounts_dir() -> Result<std::path::PathBuf, String> {
     let home = dirs::home_dir().ok_or("Cannot find home directory")?;
     Ok(home.join(".claude-ultra").join("accounts"))
 }
+
+// NOTE: `migrate_region_to_country` removed — round 42 dropped the legacy `region`
+// field (no live users). Existing JSON cleaned manually (`jq 'del(.region)'`).
 
 #[tauri::command]
 pub async fn list_accounts() -> Result<Vec<Account>, String> {
@@ -288,9 +324,7 @@ pub async fn update_account_label(
     state: tauri::State<'_, crate::GatewayServiceState>,
 ) -> Result<(), String> {
     let label_value = if label.is_empty() { None } else { Some(label) };
-    state.account_manager.update(&id, |a| {
-        a.custom_label = label_value;
-    }).await
+    state.account_manager.set_label(&id, label_value).await
 }
 
 #[tauri::command]
@@ -299,23 +333,8 @@ pub async fn toggle_user_status(
     enable: bool,
     state: tauri::State<'_, crate::GatewayServiceState>,
 ) -> Result<(), String> {
-    use crate::modules::account_change::AccountChange;
-    let disabled = !enable;
-    state.account_manager.apply_change(&id, |a| {
-        a.user_disabled = disabled;
-        if !disabled {
-            a.user_disabled_reason = None;
-            a.user_disabled_at = None;
-        } else {
-            a.user_disabled_reason = Some("Disabled manually by user".to_string());
-            a.user_disabled_at = Some(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64,
-            );
-        }
-    }, AccountChange::UserDisabledChanged { disabled }).await
+    let reason = if enable { None } else { Some("Disabled manually by user".to_string()) };
+    state.account_manager.set_user_disabled(&id, reason).await
 }
 
 #[tauri::command]
@@ -410,6 +429,60 @@ mod tests {
     use once_cell::sync::Lazy;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    fn mk_account() -> Account {
+        Account {
+            account_id: "test".to_string(),
+            email: String::new(),
+            phone_number: String::new(),
+            full_name: String::new(),
+            custom_label: None,
+            account_uuid: String::new(),
+            org_id: String::new(),
+            country: None,
+            created_at: 0,
+            subscription_type: "free".to_string(),
+            rate_limit_tier: None,
+            subscription_renew_at: None,
+            subscription_created_at: None,
+            billing_type: None,
+            has_extra_usage_enabled: false,
+            login_method: "manual".to_string(),
+            disabled: false,
+            disabled_reason: None,
+            disabled_at: None,
+            user_disabled: false,
+            user_disabled_reason: None,
+            user_disabled_at: None,
+            proxy: None,
+            utilization: None,
+            route_mode: "proxy".to_string(),
+            route_country: None,
+            android: None,
+            web: None,
+            cli: None,
+        }
+    }
+
+    #[test]
+    fn test_resolve_country_non_empty() {
+        let mut a = mk_account();
+        a.country = Some("jp".to_string());
+        assert_eq!(a.resolve_country(), "jp");
+    }
+
+    #[test]
+    fn test_resolve_country_default_to_us() {
+        let a = mk_account();
+        assert_eq!(a.resolve_country(), "us");
+    }
+
+    #[test]
+    fn test_resolve_country_empty_falls_back_us() {
+        let mut a = mk_account();
+        a.country = Some("   ".to_string());
+        assert_eq!(a.resolve_country(), "us");
+    }
 
     struct TestDataDir {
         path: PathBuf,
@@ -791,18 +864,24 @@ pub async fn get_account_quota(
         proxy_url,
     );
 
-    let usage = client.get_usage().await
-        .map_err(|e| format!("Failed to fetch usage: {}", e))?;
+    let usage = match client.get_usage().await {
+        Ok(u) => u,
+        Err(crate::modules::cli_client::CliClientError::HttpStatus(status, ref msg))
+            if matches!(status, 401 | 403) =>
+        {
+            let reason = format!("HTTP {}: {}", status, msg);
+            let _ = state.account_manager.set_disabled(&account_id, Some(reason.clone())).await;
+            return Err(reason);
+        }
+        Err(e) => return Err(format!("Failed to fetch usage: {}", e)),
+    };
     let usage_value = serde_json::to_value(&usage)
         .map_err(|e| format!("Serialization error: {}", e))?;
 
-    // Persist + notify consumers via route_change
+    // Persist + notify consumers
     let snapshot = crate::models::quota::utilization_to_snapshot(&usage);
-    state.account_manager.apply_change(&account_id, |a| {
-        a.utilization = Some(usage_value.clone());
-    }, crate::modules::account_change::AccountChange::UtilizationUpdated {
-        snapshot,
-    }).await.map_err(|e| format!("Failed to persist quota: {}", e))?;
+    state.account_manager.set_utilization(&account_id, usage_value.clone(), snapshot)
+        .await.map_err(|e| format!("Failed to persist quota: {}", e))?;
 
     Ok(usage_value)
 }

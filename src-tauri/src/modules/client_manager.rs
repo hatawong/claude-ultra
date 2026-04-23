@@ -22,11 +22,17 @@ use crate::modules::cli_client::CliClient;
 /// Per-account runtime state — not persisted, generated on startup.
 #[derive(Debug, Clone)]
 pub struct AccountRuntimeState {
-    pub session_uuid: String,
     pub device_id: String,
     pub account_uuid: String, // Anthropic's account UUID (from get_profile)
     pub quota: Option<QuotaSnapshot>,
     pub model_rate_limits: HashMap<String, Instant>,
+    /// ISO 3166-1 alpha-2 lowercase. Mirrors Account.country for gateway hot path —
+    /// avoids per-request account JSON read. Synced via AccountChange::RouteUpdated.
+    pub country: String,
+    /// Per-account routing mode: "proxy" | "direct" | "vercel"
+    pub route_mode: String,
+    /// Per-account proxy country override. None = follow account.country.
+    pub route_country: Option<String>,
 }
 
 /// Manages a pool of CliClients with round-robin selection, watermark filtering,
@@ -34,7 +40,7 @@ pub struct AccountRuntimeState {
 pub struct ClientManager {
     /// CliClient pool keyed by account_id.
     clients: Arc<DashMap<String, CliClient>>,
-    /// Per-account runtime state (session_uuid, device_id, quota, model rate limits).
+    /// Per-account runtime state (device_id, account_uuid, quota, model rate limits, routing).
     runtime_state: DashMap<String, AccountRuntimeState>,
     /// Ordered account IDs for round-robin.
     ordered_ids: RwLock<Vec<String>>,
@@ -164,11 +170,13 @@ impl ClientManager {
             );
 
             let runtime = AccountRuntimeState {
-                session_uuid: uuid::Uuid::new_v4().to_string(),
                 device_id: cli_cred.device_id.clone(),
                 account_uuid: account.account_uuid.clone(),
                 quota: None, // populated at runtime by Gateway handler
                 model_rate_limits: HashMap::new(),
+                country: account.resolve_country(),
+                route_mode: account.route_mode.clone(),
+                route_country: account.route_country.clone(),
             };
 
             self.runtime_state.insert(id.clone(), runtime);
@@ -258,11 +266,13 @@ impl ClientManager {
                         lt.upstream_proxy,
                     );
                     let runtime = AccountRuntimeState {
-                        session_uuid: uuid::Uuid::new_v4().to_string(),
                         device_id,
                         account_uuid,
                         quota: None,
                         model_rate_limits: HashMap::new(),
+                        country: "us".to_string(), // legacy token: no country info
+                        route_mode: "proxy".to_string(),
+                        route_country: None,
                     };
                     self.runtime_state.insert(id.clone(), runtime);
                     self.clients.insert(id, cli);
@@ -313,11 +323,13 @@ impl ClientManager {
             None, // proxy_url set by handler from ProxyAllocator
         );
         let runtime = AccountRuntimeState {
-            session_uuid: uuid::Uuid::new_v4().to_string(),
             device_id: cli_cred.device_id.clone(),
             account_uuid: account.account_uuid.clone(),
             quota: None,
             model_rate_limits: HashMap::new(),
+            country: account.resolve_country(),
+            route_mode: account.route_mode.clone(),
+            route_country: account.route_country.clone(),
         };
 
         self.runtime_state.insert(id.clone(), runtime);
@@ -372,7 +384,7 @@ impl ClientManager {
                 if let Some(state) = self.runtime_state.get(*id) {
                     if let Some(ref q) = state.quota {
                         let max_util = self.max_utilization(q);
-                        if max_util >= self.safety_watermark {
+                        if max_util > self.safety_watermark {
                             return false;
                         }
                     }
@@ -407,31 +419,31 @@ impl ClientManager {
     ) -> Option<CliClient> {
         // 1. Try session affinity
         if let Some(sid) = session_id {
-            if let Some(entry) = self.session_map.get(sid) {
-                let aid = entry.value().0.clone();
-                // Check if the account is still usable
-                if let Some(client) = self.clients.get(&aid) {
+            // Extract aid then drop the DashMap Ref IMMEDIATELY — holding a Ref across any
+            // write to the same shard (insert/remove below) deadlocks the shard's RwLock.
+            let aid_opt: Option<String> = self.session_map.get(sid).map(|e| e.value().0.clone());
+            if let Some(aid) = aid_opt {
+                // Check if the account is still usable. All subsequent DashMap reads are
+                // short-lived (not held across await or across writes to same map).
+                let client_opt = self.clients.get(&aid).map(|e| e.value().clone());
+                if let Some(client) = client_opt {
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let token_buffer_ms: i64 = 5 * 60 * 1000;
-                    // Check each condition individually for diagnostics
                     let not_attempted = !attempted.contains(&aid);
                     let not_temp_unsched = !self.temp_unschedulable.get(&aid).map_or(false, |e| now_ms < e.0);
                     let model_ok = model.map_or(true, |m| self.is_model_available(&aid, m));
                     let quota_ok = self.runtime_state.get(&aid).map_or(true, |state| {
-                        state.quota.as_ref().map_or(true, |q| self.max_utilization(q) < self.alert_watermark)
+                        state.quota.as_ref().map_or(true, |q| self.max_utilization(q) <= self.alert_watermark)
                     });
                     let token_ok = now_ms + token_buffer_ms < client.expires_at;
 
                     let is_available = not_attempted && not_temp_unsched && model_ok && quota_ok && token_ok;
                     if is_available {
-                        // Update last-used timestamp
-                        drop(entry);
-                        let now_ms = chrono::Utc::now().timestamp_millis();
+                        // Update last-used timestamp (safe — no outstanding Ref on session_map)
                         self.session_map.insert(sid.to_string(), (aid.clone(), now_ms));
                         tracing::debug!("Session affinity hit: {} → {}", sid, aid);
-                        return Some(client.value().clone());
+                        return Some(client);
                     }
-                    // Log which condition failed
                     tracing::warn!(
                         "Session affinity unavailable: {} → {} (attempted={} temp_unsched={} model={} quota={} token={})",
                         sid, aid, !not_attempted, !not_temp_unsched, !model_ok, !quota_ok, !token_ok
@@ -439,7 +451,7 @@ impl ClientManager {
                 } else {
                     tracing::warn!("Session affinity miss: {} → {} not in clients DashMap", sid, aid);
                 }
-                // Account unavailable — remove stale mapping
+                // Account unavailable — remove stale mapping (safe — no outstanding Ref)
                 tracing::debug!("Session affinity miss (unavailable): {} → {}, reassigning", sid, aid);
                 self.session_map.remove(sid);
             }
@@ -538,6 +550,47 @@ impl ClientManager {
             cli.access_token = new_access_token;
             cli.refresh_token = new_refresh_token;
             cli.expires_at = new_expires_at;
+        }
+    }
+
+    /// Fast O(1) read of an account's target country (ISO lowercase).
+    /// Returns None if account isn't in the pool — caller falls back to global GeoPolicy.
+    pub fn get_country(&self, account_id: &str) -> Option<String> {
+        self.runtime_state.get(account_id).map(|r| r.country.clone())
+    }
+
+    pub fn get_route_mode(&self, account_id: &str) -> String {
+        self.runtime_state.get(account_id)
+            .map(|r| r.route_mode.clone())
+            .unwrap_or_else(|| "proxy".to_string())
+    }
+
+    pub fn get_route_country(&self, account_id: &str) -> Option<String> {
+        self.runtime_state.get(account_id)
+            .and_then(|r| r.route_country.clone())
+    }
+
+    /// Resolved proxy country: route_country > account country > "us".
+    /// Single source of truth — matches Account.resolve_proxy_country().
+    pub fn get_proxy_country(&self, account_id: &str) -> String {
+        let route_country = self.runtime_state.get(account_id)
+            .and_then(|r| r.route_country.clone());
+        let account_country = self.runtime_state.get(account_id)
+            .map(|r| r.country.clone());
+        route_country
+            .or(account_country)
+            .unwrap_or_else(|| "us".to_string())
+    }
+
+    pub fn set_route_mode(&self, account_id: &str, mode: &str) {
+        if let Some(mut rs) = self.runtime_state.get_mut(account_id) {
+            rs.route_mode = mode.to_lowercase();
+        }
+    }
+
+    pub fn set_route_country(&self, account_id: &str, country: Option<&str>) {
+        if let Some(mut rs) = self.runtime_state.get_mut(account_id) {
+            rs.route_country = country.map(|c| c.to_lowercase());
         }
     }
 
@@ -708,12 +761,24 @@ mod tests {
     // ── watermark ───────────────────────────────────────────
 
     #[test]
-    fn test_watermark_at_safety_excluded() {
+    fn test_watermark_at_safety_included() {
+        // Safety check uses `>` so util exactly AT safety_watermark is still usable.
         let dir = TestDir::new();
         write_file(&dir.path, "a1.json", &make_v3_account("a1", "a1@t.com"));
         let cm = make_manager();
         cm.load_clients(&dir.path).unwrap();
         cm.update_quota("a1", make_quota(0.8, 0.3));
+        assert!(cm.get_client_simple(&HashSet::new()).is_some());
+    }
+
+    #[test]
+    fn test_watermark_above_safety_excluded() {
+        // Util strictly above safety_watermark → excluded from selection.
+        let dir = TestDir::new();
+        write_file(&dir.path, "a1.json", &make_v3_account("a1", "a1@t.com"));
+        let cm = make_manager();
+        cm.load_clients(&dir.path).unwrap();
+        cm.update_quota("a1", make_quota(0.81, 0.3));
         assert!(cm.get_client_simple(&HashSet::new()).is_none());
     }
 
@@ -801,8 +866,77 @@ mod tests {
         let cm = make_manager();
         cm.load_clients(&dir.path).unwrap();
         let state = cm.get_runtime_state("a1").unwrap();
-        assert!(!state.session_uuid.is_empty());
         assert_eq!(state.device_id.len(), 64);
+    }
+
+    // ── country cache ──────────────────────────────────────
+    // Gateway hot path reads country from runtime_state (O(1) DashMap) instead of
+    // disk. These tests ensure load_clients populates the cache, set_country updates
+    // it without touching disk, and get_country returns the fresh value.
+
+    fn make_v3_account_with_country(account_id: &str, email: &str, country: &str) -> String {
+        format!(
+            r#"{{
+                "accountId": "{}",
+                "email": "{}",
+                "accountUuid": "{}",
+                "country": "{}",
+                "cli": {{
+                    "accessToken": "sk-ant-oat01-{}",
+                    "refreshToken": "sk-ant-ort01-{}",
+                    "expiresAt": 2000003600000,
+                    "deviceId": "{:064x}"
+                }}
+            }}"#,
+            account_id, email, make_test_uuid(account_id), country, account_id, account_id,
+            account_id.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64))
+        )
+    }
+
+    #[test]
+    fn test_load_clients_populates_country_from_account_json() {
+        let dir = TestDir::new();
+        write_file(&dir.path, "a1.json", &make_v3_account_with_country("a1", "a@t.com", "jp"));
+        let cm = make_manager();
+        cm.load_clients(&dir.path).unwrap();
+        assert_eq!(cm.get_country("a1"), Some("jp".to_string()));
+    }
+
+    #[test]
+    fn test_load_clients_defaults_country_us_when_missing() {
+        let dir = TestDir::new();
+        // V3 account JSON without country field → falls back to "us".
+        write_file(&dir.path, "a1.json", &make_v3_account("a1", "a@t.com"));
+        let cm = make_manager();
+        cm.load_clients(&dir.path).unwrap();
+        assert_eq!(cm.get_country("a1"), Some("us".to_string()));
+    }
+
+    #[test]
+    fn test_get_country_returns_none_for_unknown_account() {
+        let cm = make_manager();
+        assert_eq!(cm.get_country("never-loaded"), None);
+    }
+
+    #[test]
+    fn test_add_client_copies_country_from_account() {
+        let cm = make_manager();
+        // Construct an Account in memory (simulating new account load after registration).
+        let account: Account = serde_json::from_str(
+            &make_v3_account_with_country("a1", "a@t.com", "PH")
+        ).unwrap();
+        assert!(cm.add_client(&account));
+        assert_eq!(cm.get_country("a1"), Some("ph".to_string()));
+    }
+
+    #[test]
+    fn test_legacy_token_load_defaults_to_us() {
+        // Legacy token format has no country field — must default to "us".
+        let dir = TestDir::new();
+        write_file(&dir.path, "a1.json", &make_legacy_token("a1", "a@t.com"));
+        let cm = make_manager();
+        cm.load_tokens(&dir.path).unwrap();
+        assert_eq!(cm.get_country("a1"), Some("us".to_string()));
     }
 
     // ── Negative: invalid fingerprint fields are rejected ───

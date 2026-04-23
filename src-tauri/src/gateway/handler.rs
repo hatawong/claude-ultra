@@ -19,10 +19,11 @@ use crate::modules::client_manager::ClientManager;
 use crate::modules::token_allocator::TokenAllocator;
 use crate::proxy::config::ProxyProviderConfig;
 use crate::proxy::pool::{ProxyPool, ProxyError};
-use super::builder::{self as builder, AccountIdentity};
+use super::builder::{self as builder, RequestContext};
 use crate::modules::gateway_db;
 use crate::proxy::allocator::ProxyAllocator;
 use crate::models::quota;
+use crate::gateway::route::ActualRoute;
 
 /// First-byte timeout for SSE streams (30 seconds).
 const FIRST_BYTE_TIMEOUT_SECS: u64 = 30;
@@ -48,6 +49,9 @@ pub struct AppState {
     /// Proxy mode: Proxied (ProxyPool) or Direct (BoringClient direct).
     pub proxy_mode: crate::models::config::ProxyMode,
     pub upstream_base_url: String,
+    pub vercel_api_key: String,
+    pub has_proxy: bool,
+    pub vercel_proxy_url: Option<String>,
 }
 
 /// GET /health — always returns 200 OK.
@@ -71,6 +75,53 @@ pub async fn handle_count_tokens(
     request: Request<Body>,
 ) -> Response {
     gateway_request(state, request, "/v1/messages/count_tokens", false, Some(addr)).await
+}
+
+#[cfg(feature = "internal")]
+pub async fn handle_transparent_messages(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response {
+    transparent_entry(state, request, "/v1/messages", true, Some(addr)).await
+}
+
+#[cfg(feature = "internal")]
+pub async fn handle_transparent_count_tokens(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response {
+    transparent_entry(state, request, "/v1/messages/count_tokens", false, Some(addr)).await
+}
+
+#[cfg(feature = "internal")]
+async fn transparent_entry(
+    state: AppState,
+    request: Request<Body>,
+    path: &str,
+    endpoint_allows_sse: bool,
+    client_addr: Option<SocketAddr>,
+) -> Response {
+    let start_time = std::time::Instant::now();
+    let enable_logging = state.enable_logging.load(std::sync::atomic::Ordering::Relaxed);
+    let (parts, body) = request.into_parts();
+    let client_ip = client_addr.map(|a| a.ip().to_string());
+    let user_agent = parts.headers.get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+    let body_bytes = match axum::body::to_bytes(body, 100 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("[FAIL] path={} body read: {} (transparent)", path, e);
+            return (StatusCode::BAD_REQUEST, format!("body: {}", e)).into_response();
+        }
+    };
+    transparent_forward(
+        state, parts, body_bytes, path,
+        endpoint_allows_sse, enable_logging,
+        client_ip, user_agent, start_time,
+    ).await
 }
 
 
@@ -204,10 +255,17 @@ async fn gateway_request(
                     tokio::time::sleep(Duration::from_millis(2000)).await;
                     continue;
                 }
-                tracing::error!("[HANDLER] no available accounts, returning 503 (attempted={:?})", attempted);
+                tracing::error!("[HANDLER] no available accounts, returning 429 (attempted={:?})", attempted);
+                let body = serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": "[Claude Ultra] All accounts have exceeded quota limits. Please wait for quota reset.",
+                    }
+                });
                 return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "No available accounts in pool",
+                    StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(body),
                 )
                     .into_response();
             }
@@ -233,11 +291,15 @@ async fn gateway_request(
         // Token refresh is handled by AccountMonitor in the background.
         // No token precheck needed on the request path.
 
-        let account_fp = AccountIdentity {
-            access_token: cli.access_token.clone(),
-            session_uuid: runtime.session_uuid.clone(),
+        let mapped_session_uuid = builder::compute_mapped_session_uuid(
+            session_id.as_deref().unwrap_or(""),
+            &runtime.account_uuid,
+        );
+        let request_context = RequestContext {
             device_id: runtime.device_id.clone(),
             account_uuid: runtime.account_uuid.clone(),
+            access_token: cli.access_token.clone(),
+            mapped_session_uuid,
         };
 
         // Middle loop: same-account retries
@@ -249,7 +311,7 @@ async fn gateway_request(
 
             // Per-attempt metadata rewrite on the parsed Value, then serialize.
             let mut attempt_value = prepared.value.clone();
-            match builder::apply_metadata_in_place(&mut attempt_value, &account_fp) {
+            match builder::apply_metadata_in_place(&mut attempt_value, &request_context) {
                 Ok(()) => {}
                 Err(e) if e.is_license() => {
                     // License errors: return immediately, no failover/retry
@@ -301,6 +363,8 @@ async fn gateway_request(
                         .unwrap();
                 }
             };
+            // Precompute placeholder offset.
+            let cch_offset = builder::find_billing_cch_offset(&modified_body, &attempt_value);
             // Capture request body for logging (before send-path processing).
             let request_body_for_log = if enable_logging && !log_created {
                 Some(String::from_utf8_lossy(&modified_body).into_owned())
@@ -308,95 +372,160 @@ async fn gateway_request(
                 None
             };
 
+            // ── Route resolution ──
+            let route_mode = state.client_manager.get_route_mode(&account_id);
+            let proxy_country = state.client_manager.get_proxy_country(&account_id);
+
+            let actual = if state.proxy_mode == crate::models::config::ProxyMode::Direct {
+                ActualRoute::Direct
+            } else {
+                crate::gateway::route::resolve_route(
+                    &route_mode,
+                    &proxy_country,
+                    state.has_proxy,
+                    !state.vercel_api_key.is_empty(),
+                )
+            };
+
+            let upstream_host = match &actual {
+                ActualRoute::Vercel => "ai-gateway.vercel.sh",
+                _ => "api.anthropic.com",
+            };
+            let vercel_key = if matches!(&actual, ActualRoute::Vercel) && !state.vercel_api_key.is_empty() {
+                Some(state.vercel_api_key.as_str())
+            } else {
+                None
+            };
             let final_headers =
-                builder::build_outbound_headers(&parts.headers, &account_fp, modified_body.len());
-            let url = builder::build_outbound_url(&state.upstream_base_url, path);
+                builder::build_outbound_headers(&parts.headers, &request_context, modified_body.len(), upstream_host, vercel_key);
+            let url = match &actual {
+                ActualRoute::Vercel =>
+                    builder::build_outbound_url("https://ai-gateway.vercel.sh", path),
+                _ =>
+                    builder::build_outbound_url(&state.upstream_base_url, path),
+            };
 
             tracing::info!(
-                "[REQ] account={} model={}",
-                account_id, model
+                "[REQ ] account={} model={} route={}",
+                account_id, model, actual.label()
             );
             let send_start = std::time::Instant::now();
 
-            // Send request: Proxied mode uses ProxyPool, Direct mode uses BoringClient
-            // Unified to http::Response<axum::body::Body> for downstream processing
-            let resp: http::Response<axum::body::Body> = if state.proxy_mode == crate::models::config::ProxyMode::Proxied {
-                let pool = state.proxy_pool.as_ref().expect("ProxyPool required for gateway");
-                match pool.client(&account_id)
-                    .post(&url)
-                    .headers(final_headers.clone())
-                    .body(Bytes::from(modified_body.clone()))
-                    .cc_cli_version(&prepared.version)
-                    .send()
-                    .await
-                {
-                    Ok(proxy_resp) => {
-                        let send_elapsed = send_start.elapsed();
-                        tracing::info!(
-                            "[RESP] account={} status={} send_ms={}",
-                            account_id, proxy_resp.status().as_u16(), send_elapsed.as_millis()
-                        );
-                        let http_resp = proxy_resp.into_http_response();
-                        http_resp.map(|body| axum::body::Body::new(body))
-                    }
-                    Err(ProxyError::ConnectionFailed(msg)) => {
-                        let send_elapsed = send_start.elapsed();
-                        tracing::warn!(
-                            "[FAIL] account={} proxy connection failed: {} send_ms={} (retry {}/{})",
-                            account_id, msg, send_elapsed.as_millis(),
-                            proxy_retry_count + 1, max_proxy_retries
-                        );
-                        if proxy_retry_count < max_proxy_retries {
-                            proxy_retry_count += 1;
-                            pool.renew_proxy(&account_id).await;
-                            continue 'middle;
+            // Send request: three-way routing (Proxy / Vercel / Direct)
+            let resp: http::Response<axum::body::Body> = match &actual {
+                ActualRoute::Proxy(_) => {
+                    let pool = state.proxy_pool.as_ref().expect("ProxyPool required for gateway");
+                    let proxy_country = match &actual {
+                        ActualRoute::Proxy(c) => c.as_str(),
+                        _ => "us",
+                    };
+                    let client = pool.client_with_country(&account_id, proxy_country);
+                    match client
+                        .post(&url)
+                        .headers(final_headers.clone())
+                        .body(Bytes::from(modified_body.clone()))
+                        .cc_cli_version(&prepared.version, cch_offset)
+                        .send()
+                        .await
+                    {
+                        Ok(proxy_resp) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::info!(
+                                "[RESP] account={} status={} send_ms={}",
+                                account_id, proxy_resp.status().as_u16(), send_elapsed.as_millis()
+                            );
+                            let http_resp = proxy_resp.into_http_response();
+                            http_resp.map(|body| axum::body::Body::new(body))
                         }
-                        tracing::error!("[HANDLER] proxy exhausted after {} retries: {}", max_proxy_retries, msg);
-                        return (
-                            StatusCode::BAD_GATEWAY,
-                            "Proxy connection failed. Check proxy settings.".to_string(),
-                        ).into_response();
-                    }
-                    Err(ProxyError::Exhausted(msg)) => {
-                        let send_elapsed = send_start.elapsed();
-                        tracing::warn!(
-                            "[FAIL] account={} proxy exhausted: {} send_ms={}",
-                            account_id, msg, send_elapsed.as_millis()
-                        );
-                        break 'middle true;
-                    }
-                    Err(e) => {
-                        tracing::error!("[FAIL] account={} proxy error: {}", account_id, e);
-                        last_error_recoverable = false;
-                        break 'middle true;
+                        Err(ProxyError::ConnectionFailed(msg)) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::warn!(
+                                "[FAIL] account={} proxy connection failed: {} send_ms={} (retry {}/{})",
+                                account_id, msg, send_elapsed.as_millis(),
+                                proxy_retry_count + 1, max_proxy_retries
+                            );
+                            if proxy_retry_count < max_proxy_retries {
+                                proxy_retry_count += 1;
+                                pool.renew_proxy(&account_id).await;
+                                continue 'middle;
+                            }
+                            tracing::error!("[HANDLER] proxy exhausted after {} retries: {}", max_proxy_retries, msg);
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                "Proxy connection failed. Check proxy settings.".to_string(),
+                            ).into_response();
+                        }
+                        Err(ProxyError::Exhausted(msg)) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::warn!(
+                                "[FAIL] account={} proxy exhausted: {} send_ms={}",
+                                account_id, msg, send_elapsed.as_millis()
+                            );
+                            break 'middle true;
+                        }
+                        Err(e) => {
+                            tracing::error!("[FAIL] account={} proxy error: {}", account_id, e);
+                            last_error_recoverable = false;
+                            break 'middle true;
+                        }
                     }
                 }
-            } else {
-                // Direct mode: BoringClient direct connection (no proxy, user's real IP)
-                match state.client
-                    .post(&url)
-                    .headers(final_headers.clone())
-                    .body(Bytes::from(modified_body.clone()))
-                    .cc_cli_version(&prepared.version)
-                    .send()
-                    .await
-                {
-                    Ok(direct_resp) => {
-                        let send_elapsed = send_start.elapsed();
-                        tracing::info!(
-                            "[RESP] account={} status={} send_ms={} (direct)",
-                            account_id, direct_resp.status().as_u16(), send_elapsed.as_millis()
-                        );
-                        direct_resp.map(|body| axum::body::Body::new(body))
+                ActualRoute::Vercel => {
+                    let mut vercel_req = state.client
+                        .post(&url)
+                        .headers(final_headers.clone())
+                        .body(Bytes::from(modified_body.clone()))
+                        .cc_cli_version(&prepared.version, cch_offset);
+                    if let Some(ref proxy) = state.vercel_proxy_url {
+                        vercel_req = vercel_req.proxy(proxy);
                     }
-                    Err(e) => {
-                        let send_elapsed = send_start.elapsed();
-                        tracing::warn!(
-                            "[FAIL] account={} direct connection failed: {} send_ms={}",
-                            account_id, e, send_elapsed.as_millis()
-                        );
-                        last_error_recoverable = e.is_retryable();
-                        break 'middle true;
+                    match vercel_req.send().await
+                    {
+                        Ok(vercel_resp) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::info!(
+                                "[RESP] account={} status={} send_ms={} (vercel)",
+                                account_id, vercel_resp.status().as_u16(), send_elapsed.as_millis()
+                            );
+                            vercel_resp.map(|body| axum::body::Body::new(body))
+                        }
+                        Err(e) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::warn!(
+                                "[FAIL] account={} vercel failed: {} send_ms={}",
+                                account_id, e, send_elapsed.as_millis()
+                            );
+                            last_error_recoverable = e.is_retryable();
+                            break 'middle true;
+                        }
+                    }
+                }
+                ActualRoute::Direct => {
+                    match state.client
+                        .post(&url)
+                        .headers(final_headers.clone())
+                        .body(Bytes::from(modified_body.clone()))
+                        .cc_cli_version(&prepared.version, cch_offset)
+                        .send()
+                        .await
+                    {
+                        Ok(direct_resp) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::info!(
+                                "[RESP] account={} status={} send_ms={} (direct)",
+                                account_id, direct_resp.status().as_u16(), send_elapsed.as_millis()
+                            );
+                            direct_resp.map(|body| axum::body::Body::new(body))
+                        }
+                        Err(e) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::warn!(
+                                "[FAIL] account={} direct connection failed: {} send_ms={}",
+                                account_id, e, send_elapsed.as_millis()
+                            );
+                            last_error_recoverable = e.is_retryable();
+                            break 'middle true;
+                        }
                     }
                 }
             };
@@ -422,16 +551,7 @@ async fn gateway_request(
                         let am = am.clone();
                         let account_id_clone = account_id.clone();
                         tokio::spawn(async move {
-                            let _ = am.apply_change(&account_id_clone, |a| {
-                                let existing = a.utilization.as_ref()
-                                    .and_then(|v| serde_json::from_value::<crate::modules::cli_client::Utilization>(v.clone()).ok());
-                                let merged = crate::models::quota::merge_utilization(existing, utilization);
-                                if let Ok(val) = serde_json::to_value(&merged) {
-                                    a.utilization = Some(val);
-                                }
-                            }, crate::modules::account_change::AccountChange::UtilizationUpdated {
-                                snapshot,
-                            }).await;
+                            let _ = am.merge_utilization(&account_id_clone, utilization, snapshot).await;
                         });
                     }
                 }
@@ -447,6 +567,9 @@ async fn gateway_request(
                 let model_clone = model.clone();
                 let duration_ms = start_time.elapsed().as_millis() as u64;
 
+                let req_headers_json = Some(headers_to_json(&final_headers));
+                let resp_headers_json_snapshot = Some(headers_to_json(resp.headers()));
+
                 if !is_sse {
                     let (response, resp_body, response_size, usage) = json_passthrough(resp, enable_logging).await;
                     if !log_created {
@@ -455,7 +578,9 @@ async fn gateway_request(
                             path, &model_clone, &account_id, &account_email,
                             200, duration_ms, request_size, response_size,
                             usage.as_ref(), None,
-                            request_body_for_log.clone(), resp_body, enable_logging,
+                            request_body_for_log.clone(), resp_body,
+                            req_headers_json.clone(), resp_headers_json_snapshot.clone(),
+                            enable_logging,
                             client_ip.clone(), user_agent.clone(),
                             state.gateway_db.clone(),
                         );
@@ -470,7 +595,9 @@ async fn gateway_request(
                         &stable_log_id,
                         path, &model_clone, &account_id, &account_email,
                         200, duration_ms, request_size, 0, None, None,
-                        request_body_for_log.clone(), None, enable_logging,
+                        request_body_for_log.clone(), None,
+                        req_headers_json.clone(), resp_headers_json_snapshot.clone(),
+                        enable_logging,
                         client_ip.clone(), user_agent.clone(),
                         state.gateway_db.clone(),
                     );
@@ -491,7 +618,11 @@ async fn gateway_request(
                     Err(SseProbeError::StreamInterrupted { bytes_written }) => {
                         if bytes_written > 0 {
                             // Stream Written Guard: already sent data to client → cannot failover
-                            tracing::warn!("Stream interrupted after {} bytes for {}, sending SSE error", bytes_written, account_id);
+                            // But renew proxy so client retry gets a fresh session
+                            tracing::warn!("Stream interrupted after {} bytes for {}, renew proxy + sending SSE error", bytes_written, account_id);
+                            if let Some(ref pool) = state.proxy_pool {
+                                pool.renew_proxy(&account_id).await;
+                            }
                             let event = build_sse_error_event("upstream_error", "Stream interrupted");
                             return sse_error_response(&event);
                         } else {
@@ -533,59 +664,56 @@ async fn gateway_request(
                     path, &model, &account_id, &account_email,
                     status.as_u16(), duration_ms, request_size, error_body.len() as u64,
                     None, Some(&error_body),
-                    request_body_for_log.clone(), Some(error_body.clone()), enable_logging,
+                    request_body_for_log.clone(), Some(error_body.clone()),
+                    Some(headers_to_json(&final_headers)),
+                    Some(headers_to_json(&upstream_err_headers)),
+                    enable_logging,
                     client_ip.clone(), user_agent.clone(),
                     state.gateway_db.clone(),
                 );
                 log_created = true;
             }
 
+            // Vercel route: all non-2xx → user_disabled (soft, recoverable) instead of
+            // disabled (hard). Precise error matching deferred to future e2e tests.
+            // AccountMonitor.get_usage() (direct to Anthropic via IPRoyal) handles real bans.
+            let is_vercel_route = matches!(&actual, ActualRoute::Vercel);
+
             match status.as_u16() {
-                400 if error_body.to_lowercase().contains("organization has been disabled") => {
-                    let reason = format!("HTTP 400: {}", error_message);
-                    tracing::error!("{} on {}", reason, account_id);
+                400 if !is_vercel_route && error_body.to_lowercase().contains("organization has been disabled") => {
+                    let reason = format!("HTTP 400: {}", error_body);
+                    tracing::error!("HTTP 400 (org disabled) on {}: {}", account_id, error_message);
                     if let Some(ref am) = state.account_manager {
-                        let now_ms = chrono::Utc::now().timestamp_millis();
-                        let r = reason.clone();
-                        let _ = am.apply_change(&account_id, move |a| {
-                            a.disabled = true;
-                            a.disabled_reason = Some(r);
-                            a.disabled_at = Some(now_ms);
-                        }, crate::modules::account_change::AccountChange::Disabled {
-                            reason,
-                        }).await;
+                        let _ = am.set_disabled(&account_id, Some(reason)).await;
+                    }
+                    last_error_recoverable = false;
+                    break 'middle true;
+                }
+                401 | 402 | 403 if is_vercel_route => {
+                    // Vercel path: soft disable (user can re-enable)
+                    let reason = format!("[Vercel] HTTP {}: {}", status, &error_message[..error_message.len().min(200)]);
+                    tracing::warn!("[VERCEL] {} on account={} — user_disabled (soft)", status, account_id);
+                    if let Some(ref am) = state.account_manager {
+                        let _ = am.set_user_disabled(&account_id, Some(reason)).await;
                     }
                     last_error_recoverable = false;
                     break 'middle true;
                 }
                 401 | 402 | 403 => {
-                    let reason = format!("HTTP 400: {}", error_message);
-                    tracing::error!("{} on {}", reason, account_id);
+                    // Direct/Proxy path: hard disable (Anthropic account issue)
+                    let reason = format!("HTTP {}: {}", status, error_body);
+                    tracing::error!("HTTP {} on {}: {}", status, account_id, error_message);
                     if let Some(ref am) = state.account_manager {
-                        let now_ms = chrono::Utc::now().timestamp_millis();
-                        let r = reason.clone();
-                        let _ = am.apply_change(&account_id, move |a| {
-                            a.disabled = true;
-                            a.disabled_reason = Some(r);
-                            a.disabled_at = Some(now_ms);
-                        }, crate::modules::account_change::AccountChange::Disabled {
-                            reason,
-                        }).await;
+                        let _ = am.set_disabled(&account_id, Some(reason)).await;
                     }
                     last_error_recoverable = false;
                     break 'middle true;
                 }
                 429 => {
-                    let reason = format!("HTTP 429: {}", error_message);
-                    tracing::warn!("{} on {}", reason, account_id);
+                    let reason = format!("HTTP 429: {}", error_body);
+                    tracing::warn!("HTTP 429 on {}: {}", account_id, error_message);
                     if let Some(ref am) = state.account_manager {
-                        let r = reason.clone();
-                        let _ = am.apply_change(&account_id, move |a| {
-                            a.user_disabled = true;
-                            a.disabled_reason = Some(r);
-                        }, crate::modules::account_change::AccountChange::UserDisabledChanged {
-                            disabled: true,
-                        }).await;
+                        let _ = am.set_user_disabled(&account_id, Some(reason)).await;
                     }
                     last_error_recoverable = false;
                     break 'middle true;
@@ -720,6 +848,14 @@ where
                 }
                 Ok(Some(Err(e))) => {
                     tracing::error!("SSE stream error: {}", e);
+                    let err_json = serde_json::json!({
+                        "type": "error",
+                        "error": {
+                            "type": "overloaded_error",
+                            "message": "Overloaded",
+                        }
+                    });
+                    yield Ok(Bytes::from(format!("event: error\ndata: {}\n\n", err_json)));
                     break;
                 }
                 Ok(None) => break,
@@ -783,6 +919,17 @@ fn sse_error_response(event: &str) -> Response {
     *response.status_mut() = StatusCode::OK;
     *response.headers_mut() = response_headers;
     response
+}
+
+/// Serialize HeaderMap to JSON array of [name, value] pairs for log storage.
+fn headers_to_json(headers: &http::HeaderMap) -> String {
+    let pairs: Vec<[String; 2]> = headers
+        .iter()
+        .map(|(n, v)| {
+            [n.as_str().to_string(), v.to_str().unwrap_or("").to_string()]
+        })
+        .collect();
+    serde_json::to_string(&pairs).unwrap_or_else(|_| "[]".to_string())
 }
 
 /// Copy passthrough headers from upstream response to gateway response.
@@ -910,6 +1057,8 @@ fn log_gateway_request_with_id(
     error: Option<&str>,
     request_body: Option<String>,
     response_body: Option<String>,
+    request_headers: Option<String>,
+    response_headers: Option<String>,
     enable_logging: bool,
     client_ip: Option<String>,
     user_agent: Option<String>,
@@ -953,6 +1102,8 @@ fn log_gateway_request_with_id(
         api_key_prefix: None,
         request_body,
         response_body,
+        request_headers,
+        response_headers,
     };
 
     let log_id = log.id.clone();
@@ -972,6 +1123,240 @@ fn log_gateway_request_with_id(
     }
 
     log_id
+}
+
+/// Build a pseudo email for a transparent caller's pseudo-account log entry.
+/// IPv6 literals are wrapped in `[...]` so the string stays closer to
+/// RFC 5321 and avoids raw `:` characters leaking into UI columns.
+#[cfg(feature = "internal")]
+fn build_pseudo_email(host: &str) -> String {
+    let host_part = if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]", host)
+    } else {
+        host.to_string()
+    };
+    format!("transparent@{}", host_part)
+}
+
+/// Transparent forward — no account selection, no body rewrite, no header rewrite.
+/// Direct to api.anthropic.com (no proxy). Inbound Authorization passthrough.
+#[cfg(feature = "internal")]
+pub(super) async fn transparent_forward(
+    state: AppState,
+    parts: http::request::Parts,
+    body_bytes: Bytes,
+    path: &str,
+    endpoint_allows_sse: bool,
+    enable_logging: bool,
+    client_ip: Option<String>,
+    user_agent: Option<String>,
+    start_time: std::time::Instant,
+) -> Response {
+    use http::HeaderValue;
+    let stable_log_id = uuid::Uuid::new_v4().to_string();
+
+    // Pseudo-account: aggregate by client IP. v5 UUID keeps it distinct from real
+    // account UUIDs and stable per IP.
+    let host = client_ip.as_deref().unwrap_or("unknown");
+    let pseudo_email = build_pseudo_email(host);
+    let pseudo_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_URL,
+        pseudo_email.as_bytes(),
+    ).to_string();
+
+    let query = parts.uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let url = format!("https://api.anthropic.com{}{}", path, query);
+
+    let mut outbound = http::HeaderMap::new();
+    // Strip only protocol-critical entries that must be rewritten per hop.
+    // The remaining hop-by-hop set (connection/keep-alive/te/trailer/
+    // upgrade/proxy-*) is intentionally preserved so the outbound header
+    // list matches what a native CLI request looks like on the wire.
+    for (name, value) in parts.headers.iter() {
+        let n = name.as_str().to_lowercase();
+        if matches!(n.as_str(), "host" | "content-length" | "transfer-encoding") {
+            continue;
+        }
+        outbound.insert(name.clone(), value.clone());
+    }
+    outbound.insert("host", HeaderValue::from_static("api.anthropic.com"));
+    if let Ok(v) = HeaderValue::from_str(&body_bytes.len().to_string()) {
+        outbound.insert("content-length", v);
+    }
+
+    let req_body_log = if enable_logging {
+        Some(String::from_utf8_lossy(&body_bytes).into_owned())
+    } else {
+        None
+    };
+    let req_headers_log = Some(headers_to_json(&outbound));
+
+    let parsed: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+    let model = parsed
+        .as_ref()
+        .and_then(|v| v.get("model"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let is_sse = endpoint_allows_sse
+        && parsed
+            .as_ref()
+            .and_then(|v| v.get("stream"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+    let request_size = body_bytes.len() as u64;
+
+    tracing::info!(
+        "[REQ ] account={} model={} route=transparent",
+        pseudo_email, model
+    );
+    let send_start = std::time::Instant::now();
+    let resp = match state
+        .client
+        .post(&url)
+        .headers(outbound.clone())
+        .body(body_bytes.clone())
+        .send()
+        .await
+    {
+        Ok(r) => r.map(axum::body::Body::new),
+        Err(e) => {
+            tracing::error!("[FAIL] account={} upstream error: {}", pseudo_email, e);
+            let err_str = e.to_string();
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            // Emit a failure log so transparent audit has a record of upstream
+            // errors instead of going silent.
+            log_gateway_request_with_id(
+                &stable_log_id,
+                path,
+                &model,
+                &pseudo_id,
+                &pseudo_email,
+                502,
+                duration_ms,
+                request_size,
+                0,
+                None,
+                Some(&err_str),
+                req_body_log,
+                None,
+                req_headers_log,
+                None,
+                enable_logging,
+                client_ip,
+                user_agent,
+                state.gateway_db.clone(),
+            );
+            return (StatusCode::BAD_GATEWAY, format!("upstream error: {}", err_str))
+                .into_response();
+        }
+    };
+    let status = resp.status();
+    let resp_headers_log = Some(headers_to_json(resp.headers()));
+    let duration_ms = start_time.elapsed().as_millis() as u64;
+    tracing::info!(
+        "[RESP] account={} status={} send_ms={} (transparent)",
+        pseudo_email,
+        status.as_u16(),
+        send_start.elapsed().as_millis()
+    );
+
+    if !is_sse || status.as_u16() != 200 {
+        let (response, resp_body_log, response_size, usage) =
+            json_passthrough(resp, enable_logging).await;
+        // Mirror the main gateway path: on non-2xx, surface the upstream
+        // body as the log's `error` field so operators can filter without
+        // parsing response_body.
+        let error_field = if status.as_u16() != 200 {
+            resp_body_log.as_deref()
+        } else {
+            None
+        };
+        log_gateway_request_with_id(
+            &stable_log_id,
+            path,
+            &model,
+            &pseudo_id,
+            &pseudo_email,
+            status.as_u16(),
+            duration_ms,
+            request_size,
+            response_size,
+            usage.as_ref(),
+            error_field,
+            req_body_log,
+            resp_body_log.clone(),
+            req_headers_log,
+            resp_headers_log,
+            enable_logging,
+            client_ip,
+            user_agent,
+            state.gateway_db.clone(),
+        );
+        return response;
+    }
+
+    log_gateway_request_with_id(
+        &stable_log_id,
+        path,
+        &model,
+        &pseudo_id,
+        &pseudo_email,
+        200,
+        duration_ms,
+        request_size,
+        0,
+        None,
+        None,
+        req_body_log,
+        None,
+        req_headers_log,
+        resp_headers_log,
+        enable_logging,
+        client_ip,
+        user_agent,
+        state.gateway_db.clone(),
+    );
+
+    let mut first_byte_timeout_count = 0u32;
+    let log_id_for_fixup = stable_log_id.clone();
+    let db_for_fixup = state.gateway_db.clone();
+    match sse_probe_and_stream(
+        resp,
+        stable_log_id,
+        model,
+        &mut first_byte_timeout_count,
+        enable_logging,
+        state.gateway_db.clone(),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            // Provisional log row was written with status=200 before probing.
+            // The client is about to see a 502, so revise the persisted row
+            // accordingly so the audit trail matches reality.
+            let err_str = match e {
+                SseProbeError::FirstByteTimeout => "sse first-byte timeout".to_string(),
+                SseProbeError::StreamInterrupted { bytes_written } => {
+                    format!("sse stream interrupted after {} bytes", bytes_written)
+                }
+                SseProbeError::Other(m) => m,
+            };
+            if let Some(db) = db_for_fixup {
+                let log_id = log_id_for_fixup.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(err) = db.update_status_and_error(&log_id, 502, &err_str) {
+                        tracing::error!(
+                            "Failed to patch transparent SSE failure log: {}",
+                            err
+                        );
+                    }
+                });
+            }
+            (StatusCode::BAD_GATEWAY, "sse stream error").into_response()
+        }
+    }
 }
 
 /// Emit a lightweight notification — frontend reloads from DB.
@@ -1001,7 +1386,7 @@ fn build_sse_error_event(error_type: &str, message: &str) -> String {
             "message": message,
         }
     });
-    format!("data: {}\n\n", json)
+    format!("event: error\ndata: {}\n\n", json)
 }
 
 #[cfg(test)]
@@ -1329,7 +1714,6 @@ mod tests {
         let (cm, _dir) = setup_client_manager(&[("a1", "a1@t.com"), ("a2", "a2@t.com")]);
         let s1 = cm.get_runtime_state("a1").unwrap();
         let s2 = cm.get_runtime_state("a2").unwrap();
-        assert_ne!(s1.session_uuid, s2.session_uuid, "each account has unique session");
         assert_ne!(s1.device_id, s2.device_id, "each account has unique device_id");
         assert_eq!(s1.device_id.len(), 64);
         assert_eq!(s2.device_id.len(), 64);
@@ -1368,8 +1752,64 @@ mod tests {
     #[test]
     fn test_sse_error_event() {
         let event = build_sse_error_event("upstream_error", "Stream interrupted");
+        assert!(event.starts_with("event: error\n"));
         assert!(event.contains("\"type\":\"error\""));
         assert!(event.contains("upstream_error"));
         assert!(event.ends_with("\n\n"));
+    }
+
+    #[cfg(feature = "internal")]
+    fn pseudo_id_for(ip: &str) -> String {
+        let email = build_pseudo_email(ip);
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, email.as_bytes()).to_string()
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_transparent_pseudo_id_deterministic() {
+        let a = pseudo_id_for("127.0.0.1");
+        let b = pseudo_id_for("127.0.0.1");
+        assert_eq!(a, b);
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_transparent_pseudo_id_distinct_per_ip() {
+        let v4 = pseudo_id_for("127.0.0.1");
+        let v6 = pseudo_id_for("::1");
+        let lan = pseudo_id_for("192.168.1.50");
+        assert_ne!(v4, v6);
+        assert_ne!(v4, lan);
+        assert_ne!(v6, lan);
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_transparent_pseudo_email_ipv4_passthrough() {
+        assert_eq!(build_pseudo_email("127.0.0.1"), "transparent@127.0.0.1");
+        assert_eq!(build_pseudo_email("192.168.1.50"), "transparent@192.168.1.50");
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_transparent_pseudo_email_ipv6_bracketed() {
+        assert_eq!(build_pseudo_email("::1"), "transparent@[::1]");
+        assert_eq!(
+            build_pseudo_email("2001:db8::1"),
+            "transparent@[2001:db8::1]",
+        );
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_transparent_pseudo_email_already_bracketed_not_doubled() {
+        // A pre-bracketed literal should not accrete another layer.
+        assert_eq!(build_pseudo_email("[::1]"), "transparent@[::1]");
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_transparent_pseudo_email_unknown_host() {
+        assert_eq!(build_pseudo_email("unknown"), "transparent@unknown");
     }
 }

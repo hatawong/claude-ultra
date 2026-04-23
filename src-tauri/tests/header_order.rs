@@ -5,7 +5,7 @@ use bytes::Bytes;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 
-use claude_ultra_manager_lib::gateway::builder::{self as builder, AccountIdentity};
+use claude_ultra_manager_lib::gateway::builder::{self as builder, RequestContext};
 
 #[tokio::test]
 async fn test_header_wire_order_is_alphabetical() {
@@ -38,15 +38,15 @@ async fn test_header_wire_order_is_alphabetical() {
     client_headers.insert("x-stainless-runtime-version", "v24.3.0".parse().unwrap());
     client_headers.insert("x-stainless-timeout", "600".parse().unwrap());
 
-    let account = AccountIdentity {
-        access_token: "sk-ant-oat01-test".to_string(),
-        session_uuid: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb".to_string(),
+    let account = RequestContext {
         device_id: "abcd".repeat(16),
         account_uuid: "uuid-test".to_string(),
+        access_token: "sk-ant-oat01-test".to_string(),
+        mapped_session_uuid: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb".to_string(),
     };
 
     let body_bytes = b"{}";
-    let outbound_headers = builder::build_outbound_headers(&client_headers, &account, body_bytes.len());
+    let outbound_headers = builder::build_outbound_headers(&client_headers, &account, body_bytes.len(), "api.anthropic.com", None);
 
     // Spawn client request
     let headers_clone = outbound_headers.clone();
@@ -126,4 +126,42 @@ async fn test_header_wire_order_is_alphabetical() {
     );
 
     println!("\nWire header order: ALPHABETICAL CONFIRMED");
+}
+
+#[test]
+fn test_vercel_host_header() {
+    let account = RequestContext {
+        device_id: "dev-id".to_string(),
+        account_uuid: "uuid-test".to_string(),
+        access_token: "test-token".to_string(),
+        mapped_session_uuid: "sess-uuid".to_string(),
+    };
+    let mut client_headers = http::HeaderMap::new();
+    client_headers.insert("user-agent", "claude-cli/2.1.114 (external, cli)".parse().unwrap());
+    client_headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+
+    let headers = builder::build_outbound_headers(&client_headers, &account, 100, "ai-gateway.vercel.sh", Some("vck_test_key"));
+    assert_eq!(
+        headers.get("host").unwrap().to_str().unwrap(),
+        "ai-gateway.vercel.sh",
+        "Vercel upstream should set host to ai-gateway.vercel.sh"
+    );
+
+    // x-ai-gateway-api-key present and in sorted position
+    let vck = headers.get("x-ai-gateway-api-key").expect("missing x-ai-gateway-api-key");
+    assert!(vck.to_str().unwrap().starts_with("Bearer vck_"), "vck should be Bearer format");
+    // Verify alphabetical: x-ai-gateway-api-key < x-claude-code-session-id
+    let names: Vec<String> = headers.iter().map(|(n, _)| n.as_str().to_string()).collect();
+    let ai_pos = names.iter().position(|n| n == "x-ai-gateway-api-key").unwrap();
+    let sess_pos = names.iter().position(|n| n == "x-claude-code-session-id").unwrap();
+    assert!(ai_pos < sess_pos, "x-ai-gateway-api-key should come before x-claude-code-session-id");
+
+    // Anthropic mode: no x-ai-gateway-api-key
+    let headers_anthropic = builder::build_outbound_headers(&client_headers, &account, 100, "api.anthropic.com", None);
+    assert_eq!(
+        headers_anthropic.get("host").unwrap().to_str().unwrap(),
+        "api.anthropic.com",
+        "Anthropic upstream should set host to api.anthropic.com"
+    );
+    assert!(headers_anthropic.get("x-ai-gateway-api-key").is_none(), "Anthropic mode should not have vck header");
 }

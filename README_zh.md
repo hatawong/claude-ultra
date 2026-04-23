@@ -35,6 +35,7 @@ Claude Ultra 是一个 macOS 桌面应用，通过本地 API 网关管理多个 
 | **多账号池** | 添加多个 Claude 账号，按配额可用性自动轮换 |
 | **配额监控** | 实时追踪每个账号的 5 小时 Session 和 7 天周配额 |
 | **自动故障转移** | 一个账号请求失败？自动切换到下一个可用账号重试 |
+| **网关路由** | 每账号可选不同路由模式（Proxy / Vercel / Direct）；Proxy 模式下可按账号指定国家（US / JP / KR / PH），住宅代理绑定到指定国家；首选路由不可达时自动 fallback |
 | **住宅代理** | IPRoyal 代理池，每会话固定 IP，自动轮换（[配置指南](docs/proxy-setup_zh.md)） |
 | **流量日志** | 完整请求/响应日志，含模型、Token 数、费用、延迟 |
 | **GitHub 登录** | 通过 GitHub OAuth Device Flow 认证 |

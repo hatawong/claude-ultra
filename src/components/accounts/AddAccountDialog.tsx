@@ -4,7 +4,7 @@
  * Simplified flow: create shell Account -> start Web Login -> on success write cookies -> account appears in list
  * Supports Google Auth / Email or any login method (user operates in browser).
  */
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { X, Play, Square, Pause, Trash2, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
@@ -28,82 +28,38 @@ interface AddAccountResult {
 export default function AddAccountDialog({ accountId, onAccountIdChange, onClose, onToast }: AddAccountDialogProps) {
   const { t } = useTranslation();
   const setAccountId = onAccountIdChange;
-  const taskId = accountId ? `web-login-${accountId}` : '';
+  // web-add is a singleton task (one AddAccount operation globally at a time).
+  const taskId = 'web-add';
 
-  const task = useTaskDialog({
-    taskId: taskId || '__noop__',
-    onEvent: (type, data) => {
-      if (!accountId) return;
-      if (type === 'meta' && accountId) {
-        const meta = data?.data || data;
-        invoke('update_account_profile', {
-          accountId,
-          email: meta?.email || null,
-          accountUuid: meta?.accountUuid || null,
-          orgId: meta?.orgId || null,
-          fullName: meta?.fullName || null,
-          subscriptionType: meta?.subscriptionType || null,
-          rateLimitTier: meta?.rateLimitTier || null,
-          billingType: meta?.billingType || null,
-        }).catch(() => {});
-      }
-      if (type === 'cookies') {
-        invoke('update_web_login', {
-          accountId,
-          cookies: data.cookies || [],
-          sessionKey: data.sessionKey || '',
-          proxy: null,
-        }).catch(() => {});
-      }
-      if (type === 'result' && data.success) {
-        // Save web cookies + proxy
-        invoke('update_web_login', {
-          accountId,
-          cookies: data.data?.cookies || [],
-          sessionKey: data.data?.sessionKey || '',
-          proxy: data.data?.proxy || null,
-        }).then(async () => {
-          // Save profile info
-          await invoke('update_account_profile', {
-            accountId,
-            email: data.data?.email || null,
-            accountUuid: data.data?.accountUuid || null,
-            orgId: data.data?.orgId || null,
-            fullName: data.data?.fullName || null,
-            subscriptionType: data.data?.subscriptionType || null,
-            rateLimitTier: data.data?.rateLimitTier || null,
-            billingType: data.data?.billingType || null,
-          }).catch(() => {});
-          // Notify backend → routes to ClientManager + emits account://changed → App.tsx fetchAccounts
-          try {
-            await invoke('notify_account_created', { accountId });
-          } catch {
-            // Fallback: route_change failed, manually refresh frontend list
-            const { fetchAccounts } = await import('../../stores/useAccountStore').then(m => ({ fetchAccounts: m.useAccountStore.getState().fetchAccounts }));
-            await fetchAccounts();
-          }
-          onToast?.(t('accounts.add.success', 'Account added successfully'));
-        }).catch(() => {});
-      }
-    },
-    onDone: () => {},
-  });
+  // Writes handled by Rust subprocess.rs directly to AccountManager.
+  // Dialog is display-only; toast shown on task.status === 'done'.
+  const task = useTaskDialog({ taskId });
+
+  const toastShownRef = useRef(false);
+  useEffect(() => {
+    if (task.status === 'done' && !toastShownRef.current) {
+      toastShownRef.current = true;
+      onToast?.(t('accounts.add.success', 'Account added successfully'));
+    }
+    if (task.status === 'idle' || task.status === 'running') {
+      toastShownRef.current = false;
+    }
+  }, [task.status, onToast, t]);
 
   const showStartBtn = !accountId && task.status !== 'running' && task.status !== 'paused';
   const preflight = useWebappPreflight(showStartBtn);
 
   const handleStart = useCallback(async () => {
-    // On retry, reuse existing accountId instead of creating another shell
+    // On retry, reuse existing accountId; both paths use add_account_and_login → web-add- taskId
     if (accountId) {
       await task.resetForNewRun();
       try {
-        await invoke<string>('start_web_login', { accountId });
+        await invoke<AddAccountResult>('add_account_and_login', { accountId });
       } catch (e: any) {
         task.setError(String(e));
       }
       return;
     }
-    // First time: create new account + start web login
     try {
       const result = await invoke<AddAccountResult>('add_account_and_login');
       setAccountId(result.accountId);
@@ -118,11 +74,11 @@ export default function AddAccountDialog({ accountId, onAccountIdChange, onClose
   }, []);
 
   const statusIcon = task.status === 'paused' ? '\u23f8' : {
-    idle: '', running: '\ud83d\udfe2', done: '\u2705', failed: '\u274c',
+    idle: '', running: '\ud83d\udfe2', done: '\u2705', failed: '\u274c', aborted: '\u26d4',
   }[task.status];
 
   const statusText = task.status === 'paused' ? t('task.paused', 'Paused') : {
-    idle: '', running: t('task.running', 'Running...'), done: t('task.done', 'Done'), failed: t('task.failed', 'Failed'),
+    idle: '', running: t('task.running', 'Running...'), done: t('task.done', 'Done'), failed: t('task.failed', 'Failed'), aborted: t('task.aborted', 'Aborted'),
   }[task.status];
 
   return (
@@ -163,12 +119,12 @@ export default function AddAccountDialog({ accountId, onAccountIdChange, onClose
             </div>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="text-xs">{statusIcon}</span>
+                <span className={cn("text-xs", task.status === 'paused' && "text-yellow-400")}>{statusIcon}</span>
                 <span className="text-xs text-gray-400">{statusText}</span>
                 {task.error && <span className="text-xs text-red-500 max-w-[400px] whitespace-pre-line" title={task.error}>: {task.error}</span>}
               </div>
               <div className="flex items-center gap-1.5">
-                {(task.status === 'running' || task.status === 'paused') && (
+                {(task.status === 'running' || task.status === 'paused') && !task.hasResult && (
                   <>
                     <button onClick={task.handlePauseResume} className={cn("px-2.5 py-1 text-xs font-medium rounded-lg transition-colors flex items-center gap-1", task.status === 'paused' ? "bg-green-900/20 text-green-400 hover:bg-green-900/30" : "bg-yellow-900/20 text-yellow-400 hover:bg-yellow-900/30")}>
                       {task.status === 'paused' ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
@@ -213,7 +169,7 @@ export default function AddAccountDialog({ accountId, onAccountIdChange, onClose
                 <Plus className="w-3 h-3" />{t('accounts.add.start_btn', 'Add Account')}
               </button>
             )}
-            {accountId && task.status === 'failed' && (
+            {accountId && (task.status === 'failed' || task.status === 'aborted') && (
               <button onClick={handleStart} className="px-4 py-1.5 text-xs font-medium bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1">
                 <Plus className="w-3 h-3" />{t('accounts.add.start_btn', 'Add Account')}
               </button>

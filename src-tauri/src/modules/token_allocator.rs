@@ -2,7 +2,7 @@
 //!
 //! Pre-checks token expiry, refreshes via CliClient.refresh() if needed,
 //! persists to Account JSON. Consumer notification (ClientManager) is handled
-//! by the caller via route_change(CliTokenUpdated).
+//! by set_cli which emits CliUpdated internally.
 
 use dashmap::DashMap;
 use std::sync::Arc;
@@ -47,7 +47,7 @@ impl TokenAllocator {
     /// Ensure the account's token is valid.
     /// Returns (access_token, refreshed: bool).
     /// refreshed=true means a new token was obtained and persisted to JSON.
-    /// Caller should route_change(CliTokenUpdated) when refreshed=true.
+    /// set_cli emits CliUpdated automatically when refreshed.
     pub async fn ensure_valid_token(&self, account_id: &str) -> Result<(String, bool), String> {
         // Read account to check expiry
         let account = self.account_manager.read(account_id).await
@@ -124,20 +124,16 @@ impl TokenAllocator {
             }
         };
 
-        // Persist to Account JSON
-        let at = result.access_token.clone();
-        let rt = result.refresh_token.clone();
-        let ea = result.expires_at;
-        self.account_manager.update(account_id, move |a| {
-            if let Some(ref mut cli) = a.cli {
-                cli.access_token = at;
-                cli.refresh_token = rt;
-                cli.expires_at = ea;
-            }
-        }).await.map_err(|e| format!("Failed to persist token for {}: {}", account_id, e))?;
+        // Persist to Account JSON (scopes=None → partial refresh)
+        self.account_manager.set_cli(
+            account_id,
+            result.access_token.clone(),
+            result.refresh_token.clone(),
+            result.expires_at,
+            None,
+        ).await.map_err(|e| format!("Failed to persist token for {}: {}", account_id, e))?;
 
-        // ClientManager notification is handled by the caller via route_change(CliTokenUpdated).
-        // do_refresh only persists — it does not notify consumers directly.
+        // set_cli emits CliUpdated → ClientManager sync + frontend notify handled there.
 
         tracing::info!(
             "TokenAllocator: refreshed token for {}, new expires_at={}",

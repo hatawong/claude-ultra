@@ -37,6 +37,9 @@ pub struct RequestLog {
     // Body fields (Round 21)
     pub request_body: Option<String>,
     pub response_body: Option<String>,
+    // Headers as JSON array: [["name","value"], ...]
+    pub request_headers: Option<String>,
+    pub response_headers: Option<String>,
 }
 
 /// Aggregated token stats for a time period.
@@ -123,7 +126,9 @@ impl GatewayDb {
                 user_agent TEXT,
                 api_key_prefix TEXT,
                 request_body TEXT,
-                response_body TEXT
+                response_body TEXT,
+                request_headers TEXT,
+                response_headers TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_timestamp ON request_logs (timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_account_id ON request_logs (account_id);
@@ -132,16 +137,21 @@ impl GatewayDb {
         )
         .map_err(|e| e.to_string())?;
 
-        // Migration: add body columns to existing tables that lack them
-        let has_body_col: bool = conn
-            .prepare("SELECT request_body FROM request_logs LIMIT 0")
-            .is_ok();
-        if !has_body_col {
-            conn.execute_batch(
-                "ALTER TABLE request_logs ADD COLUMN request_body TEXT;
-                 ALTER TABLE request_logs ADD COLUMN response_body TEXT;",
-            )
-            .map_err(|e| format!("Migration failed: {}", e))?;
+        // Column migrations: each ALTER runs independently and tolerates
+        // the "duplicate column name" error so a partial-migration state
+        // (one column present, sibling missing) still converges.
+        for stmt in [
+            "ALTER TABLE request_logs ADD COLUMN request_body TEXT",
+            "ALTER TABLE request_logs ADD COLUMN response_body TEXT",
+            "ALTER TABLE request_logs ADD COLUMN request_headers TEXT",
+            "ALTER TABLE request_logs ADD COLUMN response_headers TEXT",
+        ] {
+            if let Err(e) = conn.execute(stmt, []) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column name") {
+                    return Err(format!("Migration failed: {}", msg));
+                }
+            }
         }
 
         Ok(Self { conn: Mutex::new(conn) })
@@ -160,8 +170,9 @@ impl GatewayDb {
              account_id, account_email, input_tokens, output_tokens, cache_creation_tokens,
              cache_read_tokens, total_tokens, input_cost, output_cost, cache_creation_cost,
              cache_read_cost, total_cost, error, request_size, response_size,
-             client_ip, user_agent, api_key_prefix, request_body, response_body)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27)
+             client_ip, user_agent, api_key_prefix, request_body, response_body,
+             request_headers, response_headers)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
              ON CONFLICT(id) DO UPDATE SET
                 timestamp=excluded.timestamp,
                 status=excluded.status,
@@ -175,6 +186,8 @@ impl GatewayDb {
                 api_key_prefix=excluded.api_key_prefix,
                 request_body=excluded.request_body,
                 response_body=excluded.response_body,
+                request_headers=excluded.request_headers,
+                response_headers=excluded.response_headers,
                 error=excluded.error,
                 input_tokens=excluded.input_tokens,
                 output_tokens=excluded.output_tokens,
@@ -214,6 +227,8 @@ impl GatewayDb {
                 log.api_key_prefix,
                 log.request_body,
                 log.response_body,
+                log.request_headers,
+                log.response_headers,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -306,6 +321,8 @@ impl GatewayDb {
                     api_key_prefix: row.get(24)?,
                     request_body: None,  // Not loaded in list view (use get_log_detail)
                     response_body: None,
+                    request_headers: None,
+                    response_headers: None,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -483,6 +500,35 @@ impl GatewayDb {
         Ok(())
     }
 
+    /// Update response_headers for a log entry (used by SSE path after first chunk).
+    pub fn update_response_headers(&self, log_id: &str, headers_json: &str) -> Result<(), String> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE request_logs SET response_headers=?1 WHERE id=?2",
+            params![headers_json, log_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Revise status + error for a previously written log row. Used when a
+    /// provisional 200 row was written before streaming began but the stream
+    /// later failed and the client actually received a 5xx.
+    pub fn update_status_and_error(
+        &self,
+        log_id: &str,
+        status: u16,
+        error: &str,
+    ) -> Result<(), String> {
+        let conn = self.conn();
+        conn.execute(
+            "UPDATE request_logs SET status=?1, error=?2 WHERE id=?3",
+            params![status as i64, error, log_id],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     /// Get total count of logs matching optional search filter.
     pub fn get_logs_count(&self, search: Option<&str>) -> Result<u64, String> {
         let conn = self.conn();
@@ -514,7 +560,7 @@ impl GatewayDb {
              cache_creation_tokens, cache_read_tokens, total_tokens,
              input_cost, output_cost, cache_creation_cost, cache_read_cost, total_cost,
              error, request_size, response_size, client_ip, user_agent, api_key_prefix,
-             request_body, response_body
+             request_body, response_body, request_headers, response_headers
              FROM request_logs WHERE id = ?1",
             params![id],
             |row| {
@@ -546,6 +592,8 @@ impl GatewayDb {
                     api_key_prefix: row.get(24)?,
                     request_body: row.get(25)?,
                     response_body: row.get(26)?,
+                    request_headers: row.get(27)?,
+                    response_headers: row.get(28)?,
                 })
             },
         )
@@ -654,6 +702,83 @@ mod tests {
         Arc::new(GatewayDb::new(&path).unwrap())
     }
 
+    /// Build a legacy schema at the given path so migrations must run on open.
+    fn make_partial_schema(path: &std::path::Path, columns: &[&str]) {
+        use rusqlite::Connection;
+        let conn = Connection::open(path).unwrap();
+        let base = "CREATE TABLE request_logs (
+            id TEXT PRIMARY KEY,
+            timestamp INTEGER NOT NULL,
+            method TEXT,
+            url TEXT,
+            status INTEGER,
+            duration_ms INTEGER,
+            model TEXT,
+            account_id TEXT,
+            account_email TEXT,
+            input_tokens INTEGER,
+            output_tokens INTEGER,
+            cache_creation_tokens INTEGER,
+            cache_read_tokens INTEGER,
+            total_tokens INTEGER,
+            input_cost REAL,
+            output_cost REAL,
+            cache_creation_cost REAL,
+            cache_read_cost REAL,
+            total_cost REAL,
+            error TEXT,
+            request_size INTEGER,
+            response_size INTEGER,
+            client_ip TEXT,
+            user_agent TEXT,
+            api_key_prefix TEXT";
+        let extra: String = columns
+            .iter()
+            .map(|c| format!(", {} TEXT", c))
+            .collect::<Vec<_>>()
+            .join("");
+        let sql = format!("{}{});", base, extra);
+        conn.execute_batch(&sql).unwrap();
+    }
+
+    #[test]
+    fn test_migration_only_request_body_present() {
+        // Legacy schema already has request_body but is missing the other three.
+        // Batch migrations would ADD-duplicate-fail on request_body; the new
+        // per-column loop tolerates the duplicate and still adds the siblings.
+        let path = std::env::temp_dir().join(format!(
+            "claude_ultra_gateway_db_partial_{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        make_partial_schema(&path, &["request_body"]);
+        let db = GatewayDb::new(&path).expect("new() must tolerate partial migration");
+        let log = make_log("r1", "claude-sonnet-4-6", "acc1", 1000);
+        db.save_log(&log).expect("save_log must work after migration");
+    }
+
+    #[test]
+    fn test_migration_only_response_headers_present() {
+        let path = std::env::temp_dir().join(format!(
+            "claude_ultra_gateway_db_partial_{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        make_partial_schema(&path, &["response_headers"]);
+        let db = GatewayDb::new(&path).expect("new() must tolerate partial migration");
+        let log = make_log("r1", "claude-sonnet-4-6", "acc1", 1000);
+        db.save_log(&log).expect("save_log must work after migration");
+    }
+
+    #[test]
+    fn test_migration_idempotent_on_fully_migrated_db() {
+        // Running new() twice on the same path must not fail.
+        let path = std::env::temp_dir().join(format!(
+            "claude_ultra_gateway_db_idem_{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let _ = GatewayDb::new(&path).unwrap();
+        let _ = GatewayDb::new(&path).unwrap();
+    }
+
     fn make_log(id: &str, model: &str, account_id: &str, timestamp: i64) -> RequestLog {
         RequestLog {
             id: id.to_string(),
@@ -683,6 +808,8 @@ mod tests {
             api_key_prefix: None,
             request_body: None,
             response_body: None,
+            request_headers: None,
+            response_headers: None,
         }
     }
 
@@ -838,6 +965,29 @@ mod tests {
 
         let logs = db.get_logs(10, 0, None, None, None, None, None).unwrap();
         assert!(logs.is_empty());
+    }
+
+    #[test]
+    fn test_update_status_and_error_patches_existing_row() {
+        let db = make_test_db();
+        let log = make_log("r1", "claude-sonnet-4-6", "acc1", 1000);
+        db.save_log(&log).unwrap();
+
+        db.update_status_and_error("r1", 502, "sse first-byte timeout").unwrap();
+
+        let logs = db.get_logs(10, 0, None, None, None, None, None).unwrap();
+        assert_eq!(logs[0].status, 502);
+        assert_eq!(logs[0].error.as_deref(), Some("sse first-byte timeout"));
+        // Token fields untouched.
+        assert_eq!(logs[0].input_tokens, Some(1000));
+        assert_eq!(logs[0].output_tokens, Some(500));
+    }
+
+    #[test]
+    fn test_update_status_and_error_missing_id_is_noop() {
+        let db = make_test_db();
+        // Updating a non-existent row must not error; UPDATE affects 0 rows.
+        db.update_status_and_error("missing", 502, "foo").unwrap();
     }
 
     #[test]

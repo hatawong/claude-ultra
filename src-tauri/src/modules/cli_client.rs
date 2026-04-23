@@ -185,8 +185,7 @@ pub const MODELS: &[(&str, &str)] = &[
 
 #[derive(Clone)]
 pub struct CliClient {
-    /// BoringSSL HTTP client — pub so test-only `MsgClient::from_cli` in
-    /// `tests-internal/msg_client.rs` can borrow it without a getter.
+    /// BoringSSL HTTP client — exposed for crate-internal callers without a getter.
     pub client: Arc<BoringClient>,
     pub access_token: String,
     pub refresh_token: String,

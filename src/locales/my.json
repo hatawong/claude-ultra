@@ -254,6 +254,8 @@
             "cli": "Klien CLI",
             "device": "Peranti",
             "carrier": "Pembawa",
+            "country": "Negara",
+            "country_updated": "Negara dikemaskini",
             "last_activity": "Aktiviti Terakhir",
             "login": "Log Masuk",
             "keepalive": "Keepalive",
@@ -271,7 +273,8 @@
             "delete_account": "Padam Akaun",
             "oauth_reauth": "Benarkan Semula OAuth",
             "proxy_country": "Negara",
-            "proxy_region": "Wilayah"
+            "proxy_region": "Wilayah",
+            "route_updated": "Laluan dikemas kini"
         },
         "toast": {
             "proxy_enabled": "Proksi diaktifkan untuk {{count}} akaun",
@@ -353,7 +356,8 @@
             "last_used": "Terakhir Digunakan",
             "actions": "Tindakan",
             "proxy": "Proksi",
-            "last_activity": "Aktiviti Terakhir"
+            "last_activity": "Aktiviti Terakhir",
+            "route": "Laluan"
         },
         "drag_to_reorder": "Seret untuk menyusun semula",
         "empty": {
@@ -414,7 +418,12 @@
         },
         "refresh_confirm_title": "Muat Semula Kuota",
         "refresh_confirm_all": "Muat semula kuota untuk semua {{count}} akaun dengan kelayakan CLI?",
-        "refresh_confirm_selected": "Muat semula kuota untuk {{count}} akaun yang dipilih?"
+        "refresh_confirm_selected": "Muat semula kuota untuk {{count}} akaun yang dipilih?",
+        "route": {
+            "proxy": "Proksi",
+            "direct": "Terus",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "Simpan Tetapan",
@@ -914,6 +923,16 @@
             "placeholder": "(Sama dengan Kunci API)",
             "hint": "Untuk penggunaan Docker/Web. Tetapkan kata laluan log masuk berasingan untuk meningkatkan keselamatan kunci API."
         },
+        "transparent": {
+            "title": "Port Audit Telus",
+            "description": "Apabila didayakan, semua permintaan pada port ini dihantar kepada Anthropic tanpa pengubahsuaian; hanya direkodkan.",
+            "port_label": "Port",
+            "port_hint": "Localhost sahaja. Mulakan semula gateway untuk diterapkan.",
+            "bound_to": "Terikat pada",
+            "internal_badge": "Dalaman Sahaja",
+            "status_running": "Berjalan",
+            "status_stopped": "Dihentikan"
+        },
         "cli_sync": {
             "title": "Segerak Konfigurasi CLI",
             "desc": "Segerakkan endpoint API dan kunci ke CLI Claude Code tempatan anda dengan cepat.",
@@ -926,6 +945,15 @@
             "synced": "Disegerakkan",
             "sync_now": "Segerak Sekarang",
             "lan_snippet": "Petikan settings.json LAN"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "Uji",
+            "connected": "Disambungkan",
+            "not_configured": "Tidak dikonfigurasi",
+            "test_failed": "Gagal",
+            "not_tested": "Belum diuji"
         }
     },
     "security": {
@@ -1063,6 +1091,7 @@
         "paused": "Dijeda",
         "done": "Selesai",
         "failed": "Gagal",
+        "aborted": "Dibatalkan",
         "pause": "Jeda",
         "resume": "Sambung",
         "abort": "Batal",

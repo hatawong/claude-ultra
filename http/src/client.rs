@@ -79,6 +79,8 @@ impl BoringClient {
             headers: http::HeaderMap::new(),
             body: Bytes::new(),
             proxy_url: None,
+            cc_version: None,
+            cch_offset: None,
         }
     }
 
@@ -333,6 +335,7 @@ impl BoringClient {
         headers: http::HeaderMap,
         body: Bytes,
         _cc_version: Option<&semver::Version>,
+        _cch_offset: Option<usize>,
     ) -> Result<http::Response<Incoming>, Error> {
         let request = self.build_proxy_http_request(method, &uri, &headers, body)?;
         let result = tokio::time::timeout(self.timeout, sender.send_request(request)).await;
@@ -473,6 +476,8 @@ pub struct RequestBuilder<'a> {
     pub(crate) headers: http::HeaderMap,
     body: Bytes,
     proxy_url: Option<String>,
+    cc_version: Option<semver::Version>,
+    cch_offset: Option<usize>,
 }
 
 impl<'a> RequestBuilder<'a> {
@@ -500,10 +505,12 @@ impl<'a> RequestBuilder<'a> {
         self
     }
 
-    /// Stub: accepts a CC CLI version tag and performs no additional
+    /// Stub: accepts a CC CLI version tag and offset, performs no additional
     /// processing. Source builds cannot produce valid upstream requests;
     /// use the official `.dmg` for production.
-    pub fn cc_cli_version(self, _version: &semver::Version) -> Self {
+    pub fn cc_cli_version(mut self, version: &semver::Version, offset: Option<usize>) -> Self {
+        self.cc_version = Some(version.clone());
+        self.cch_offset = offset;
         self
     }
 

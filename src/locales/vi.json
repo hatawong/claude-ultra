@@ -250,6 +250,8 @@
             "cli": "Ứng dụng CLI",
             "device": "Thiết bị",
             "carrier": "Nhà mạng",
+            "country": "Quốc gia",
+            "country_updated": "Đã cập nhật quốc gia",
             "last_activity": "Hoạt động Gần nhất",
             "login": "Đăng nhập",
             "keepalive": "Giữ kết nối",
@@ -267,7 +269,8 @@
             "delete_account": "Xóa Tài khoản",
             "oauth_reauth": "Xác thực lại OAuth",
             "proxy_country": "Quốc gia",
-            "proxy_region": "Khu vực"
+            "proxy_region": "Khu vực",
+            "route_updated": "Đã cập nhật tuyến"
         },
         "toast": {
             "proxy_enabled": "Đã bật proxy cho {{count}} tài khoản",
@@ -349,7 +352,8 @@
             "last_used": "Dùng lần cuối",
             "actions": "Thao tác",
             "proxy": "Proxy",
-            "last_activity": "Hoạt động cuối"
+            "last_activity": "Hoạt động cuối",
+            "route": "Tuyến"
         },
         "drag_to_reorder": "Kéo để sắp xếp lại",
         "empty": {
@@ -415,7 +419,12 @@
         },
         "refresh_confirm_title": "Làm mới hạn mức",
         "refresh_confirm_all": "Làm mới hạn mức cho tất cả {{count}} tài khoản có thông tin CLI?",
-        "refresh_confirm_selected": "Làm mới hạn mức cho {{count}} tài khoản đã chọn?"
+        "refresh_confirm_selected": "Làm mới hạn mức cho {{count}} tài khoản đã chọn?",
+        "route": {
+            "proxy": "Proxy",
+            "direct": "Trực tiếp",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "Lưu Cài đặt",
@@ -1033,6 +1042,16 @@
             "placeholder": "(Giống với API Key)",
             "hint": "Dành cho triển khai Docker/Web. Đặt mật khẩu đăng nhập riêng để tăng bảo mật API key."
         },
+        "transparent": {
+            "title": "Cổng kiểm toán trong suốt",
+            "description": "Khi bật, mọi yêu cầu trên cổng này được chuyển tiếp nguyên trạng tới Anthropic, chỉ ghi log không chỉnh sửa.",
+            "port_label": "Cổng",
+            "port_hint": "Chỉ localhost. Khởi động lại gateway để áp dụng.",
+            "bound_to": "Gắn vào",
+            "internal_badge": "Chỉ nội bộ",
+            "status_running": "Đang chạy",
+            "status_stopped": "Đã dừng"
+        },
         "cli_sync": {
             "title": "Đồng bộ Cấu hình CLI",
             "desc": "Đồng bộ nhanh endpoint API và key đến CLI Claude Code cục bộ.",
@@ -1045,6 +1064,15 @@
             "synced": "Đã đồng bộ",
             "sync_now": "Đồng bộ Ngay",
             "lan_snippet": "Đoạn settings.json LAN"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "Kiểm tra",
+            "connected": "Đã kết nối",
+            "not_configured": "Chưa cấu hình",
+            "test_failed": "Thất bại",
+            "not_tested": "Chưa kiểm tra"
         }
     },
     "errors": {
@@ -1063,6 +1091,7 @@
         "paused": "Đã tạm dừng",
         "done": "Hoàn tất",
         "failed": "Thất bại",
+        "aborted": "Đã hủy",
         "pause": "Tạm dừng",
         "resume": "Tiếp tục",
         "abort": "Hủy",

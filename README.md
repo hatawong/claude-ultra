@@ -35,6 +35,7 @@ Claude Ultra is a macOS desktop app that manages multiple Claude Code accounts t
 | **Multi-Account Pool** | Add multiple Claude accounts, auto-rotate based on quota availability |
 | **Quota Monitoring** | Real-time session (5h) and weekly (7d) usage tracking per account |
 | **Automatic Failover** | Request fails on one account? Seamlessly retries on the next available one |
+| **Gateway Routing** | Per-account routing mode (Proxy / Vercel / Direct); in Proxy mode, pick a country (US / JP / KR / PH) and the residential proxy binds accordingly; automatic fallback when the preferred route is unavailable |
 | **Residential Proxy** | IPRoyal proxy pool with per-session sticky IPs and automatic rotation ([setup guide](docs/proxy-setup.md)) |
 | **Traffic Logs** | Full request/response logging with model, tokens, cost, and latency |
 | **GitHub Login** | Device flow authentication via GitHub OAuth |

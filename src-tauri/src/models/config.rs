@@ -23,6 +23,8 @@ pub struct AppConfig {
     pub email: EmailConfig,
     #[serde(default)]
     pub sms: SmsConfig,
+    #[serde(default)]
+    pub registration: RegistrationConfig,
 }
 
 fn default_server_url() -> String { "https://api.claude-ultra.com".to_string() }
@@ -36,6 +38,7 @@ impl Default for AppConfig {
             proxy: ProxyConfig::default(),
             email: EmailConfig::default(),
             sms: SmsConfig::default(),
+            registration: RegistrationConfig::default(),
         }
     }
 }
@@ -107,9 +110,24 @@ pub struct GatewayConfig {
     pub enable_logging: bool,
     #[serde(default = "default_upstream_base_url")]
     pub upstream_base_url: String,
+    #[serde(default)]
+    pub vercel_api_key: String,
+    #[serde(default)]
+    pub vercel_proxy_url: Option<String>,
+
+    #[cfg(feature = "internal")]
+    #[serde(default)]
+    pub transparent_enabled: bool,
+
+    #[cfg(feature = "internal")]
+    #[serde(default = "default_transparent_port")]
+    pub transparent_port: u16,
 }
 
 fn default_upstream_base_url() -> String { "https://api.anthropic.com".to_string() }
+
+#[cfg(feature = "internal")]
+fn default_transparent_port() -> u16 { 9001 }
 
 fn default_port() -> u16 { 9000 }
 fn default_bind_address() -> String { "127.0.0.1".to_string() }
@@ -136,6 +154,12 @@ impl Default for GatewayConfig {
             admin_password: String::new(),
             enable_logging: false,
             upstream_base_url: default_upstream_base_url(),
+            vercel_api_key: String::new(),
+            vercel_proxy_url: None,
+            #[cfg(feature = "internal")]
+            transparent_enabled: false,
+            #[cfg(feature = "internal")]
+            transparent_port: 9001,
         }
     }
 }
@@ -256,6 +280,41 @@ pub struct SmsConfig {
 impl Default for SmsConfig {
     fn default() -> Self {
         Self { api_key: String::new() }
+    }
+}
+
+// ── RegistrationConfig ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CountryConfig {
+    #[serde(default = "default_sms_max_price")]
+    pub sms_max_price: f64,
+}
+
+fn default_sms_max_price() -> f64 { 0.51 }
+
+impl Default for CountryConfig {
+    fn default() -> Self {
+        Self { sms_max_price: default_sms_max_price() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegistrationConfig {
+    #[serde(default = "default_supported_countries")]
+    pub supported_countries: std::collections::HashMap<String, CountryConfig>,
+}
+
+fn default_supported_countries() -> std::collections::HashMap<String, CountryConfig> {
+    let mut m = std::collections::HashMap::new();
+    m.insert("us".to_string(), CountryConfig::default());
+    m.insert("ph".to_string(), CountryConfig::default());
+    m
+}
+
+impl Default for RegistrationConfig {
+    fn default() -> Self {
+        Self { supported_countries: default_supported_countries() }
     }
 }
 
@@ -498,6 +557,7 @@ mod tests {
                 mailslurp_inbox_id: "inbox1".to_string(),
             },
             sms: SmsConfig { api_key: "sms_key".to_string() },
+            registration: RegistrationConfig::default(),
         };
 
         let json = serde_json::to_string(&config).unwrap();
@@ -572,5 +632,69 @@ mod tests {
         assert_eq!(config.request_timeout, 300);
         assert!((config.safety_watermark - 0.6).abs() < f64::EPSILON);
         assert!((config.alert_watermark - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_gateway_config_transparent_enabled_default_false() {
+        let config = GatewayConfig::default();
+        assert!(!config.transparent_enabled);
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_gateway_config_transparent_port_default_9001() {
+        let config = GatewayConfig::default();
+        assert_eq!(config.transparent_port, 9001);
+    }
+
+    #[test]
+    fn test_config_old_json_without_transparent_fields_loads() {
+        // Old config without transparent_* fields should deserialize with defaults.
+        let json = r#"{"gateway":{"port":9000}}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.gateway.port, 9000);
+        #[cfg(feature = "internal")]
+        {
+            assert!(!config.gateway.transparent_enabled);
+            assert_eq!(config.gateway.transparent_port, 9001);
+        }
+    }
+
+    #[test]
+    fn test_config_json_with_transparent_fields_accepted() {
+        // JSON written by an internal build — carrying `transparent_enabled`
+        // and `transparent_port` — must still deserialize on a default
+        // build. Without `deny_unknown_fields`, serde silently drops them;
+        // this test pins that behaviour so a future attribute change cannot
+        // break cross-build config compatibility without failing CI.
+        let json = r#"{
+            "gateway": {
+                "port": 9000,
+                "transparent_enabled": true,
+                "transparent_port": 9001
+            }
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.gateway.port, 9000);
+        #[cfg(feature = "internal")]
+        {
+            assert!(config.gateway.transparent_enabled);
+            assert_eq!(config.gateway.transparent_port, 9001);
+        }
+    }
+
+    #[cfg(feature = "internal")]
+    #[test]
+    fn test_config_round_trip_preserves_transparent_fields() {
+        let mut cfg = AppConfig::default();
+        cfg.gateway.transparent_enabled = true;
+        cfg.gateway.transparent_port = 9999;
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"transparent_enabled\":true"));
+        assert!(json.contains("\"transparent_port\":9999"));
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.gateway.transparent_enabled);
+        assert_eq!(back.gateway.transparent_port, 9999);
     }
 }

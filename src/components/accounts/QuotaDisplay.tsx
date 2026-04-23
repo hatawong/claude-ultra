@@ -154,7 +154,7 @@ export function QuotaDetail({ accountId, planTier, cached }: QuotaDetailProps) {
       </div>
 
       <QuotaBar label="Session (5h)" window={usage.five_hour} />
-      <QuotaBar label="Weekly (7 day)" window={usage.seven_day} />
+      <QuotaBar label="Weekly (7d)" window={usage.seven_day} />
       <QuotaBar label="Weekly Sonnet" window={usage.seven_day_sonnet} />
     </div>
   );

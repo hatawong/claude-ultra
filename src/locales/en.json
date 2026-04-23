@@ -63,6 +63,7 @@
         "paused": "Paused",
         "done": "Done",
         "failed": "Failed",
+        "aborted": "Aborted",
         "pause": "Pause",
         "resume": "Resume",
         "abort": "Abort",
@@ -348,9 +349,15 @@
             "email": "Email",
             "quota": "Quota",
             "proxy": "Proxy",
+            "route": "Route",
             "last_activity": "Last Activity",
             "last_used": "Last Used",
             "actions": "Actions"
+        },
+        "route": {
+            "proxy": "Proxy",
+            "direct": "Direct",
+            "vercel": "Vercel"
         },
         "details": {
             "title": "Account Details",
@@ -383,6 +390,8 @@
             "cli": "CLI Client",
             "device": "Device",
             "carrier": "Carrier",
+            "country": "Country",
+            "country_updated": "Country updated",
             "last_activity": "Last Activity",
             "login": "Login",
             "keepalive": "Keepalive",
@@ -400,7 +409,8 @@
             "delete_account": "Delete Account",
             "oauth_reauth": "OAuth Re-authorize",
             "proxy_country": "Country",
-            "proxy_region": "Region"
+            "proxy_region": "Region",
+            "route_updated": "Route updated"
         },
         "drag_to_reorder": "Drag to reorder",
         "empty": {
@@ -1061,6 +1071,16 @@
             "placeholder": "(Same as API Key)",
             "hint": "For Docker/Web deployment. Set a separate login password to improve API key security."
         },
+        "transparent": {
+            "title": "Transparent Audit Port",
+            "description": "When enabled, all requests on this port are passed through to Anthropic as-is, logged but unmodified.",
+            "port_label": "Port",
+            "port_hint": "Localhost only. Restart gateway to apply.",
+            "bound_to": "Bound to",
+            "internal_badge": "Internal Only",
+            "status_running": "Running",
+            "status_stopped": "Stopped"
+        },
         "cli_sync": {
             "title": "CLI Config Sync",
             "desc": "Quickly sync API endpoint and key to your local Claude Code CLI.",
@@ -1073,6 +1093,15 @@
             "synced": "Synced",
             "sync_now": "Sync Now",
             "lan_snippet": "LAN settings.json snippet"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "Test",
+            "connected": "Connected",
+            "not_configured": "Not Configured",
+            "test_failed": "Failed",
+            "not_tested": "Not tested"
         }
     },
     "auth": {

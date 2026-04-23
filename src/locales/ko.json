@@ -241,6 +241,8 @@
             "cli": "CLI 클라이언트",
             "device": "기기",
             "carrier": "통신사",
+            "country": "국가",
+            "country_updated": "국가가 업데이트되었습니다",
             "last_activity": "마지막 활동",
             "login": "로그인",
             "keepalive": "연결 유지",
@@ -258,7 +260,8 @@
             "delete_account": "계정 삭제",
             "oauth_reauth": "OAuth 재인증",
             "proxy_country": "국가",
-            "proxy_region": "지역"
+            "proxy_region": "지역",
+            "route_updated": "라우트가 업데이트되었습니다"
         },
         "toast": {
             "proxy_enabled": "{{count}}개 계정의 프록시를 활성화했습니다",
@@ -340,7 +343,8 @@
             "last_used": "최근 사용",
             "actions": "작업",
             "proxy": "프록시",
-            "last_activity": "마지막 활동"
+            "last_activity": "마지막 활동",
+            "route": "라우트"
         },
         "drag_to_reorder": "드래그하여 순서 변경",
         "empty": {
@@ -373,7 +377,12 @@
         "max": "Max",
         "refresh_confirm_title": "할당량 새로고침",
         "refresh_confirm_all": "CLI 자격 증명이 있는 {{count}}개 계정의 할당량을 새로고침하시겠습니까?",
-        "refresh_confirm_selected": "선택한 {{count}}개 계정의 할당량을 새로고침하시겠습니까?"
+        "refresh_confirm_selected": "선택한 {{count}}개 계정의 할당량을 새로고침하시겠습니까?",
+        "route": {
+            "proxy": "프록시",
+            "direct": "직접",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "설정 저장",
@@ -955,6 +964,16 @@
             "placeholder": "(API 키와 동일)",
             "hint": "Docker/Web 배포용. 독립 비밀번호로 보안 향상."
         },
+        "transparent": {
+            "title": "투명 감사 포트",
+            "description": "활성화하면 해당 포트의 모든 요청이 Anthropic에 있는 그대로 전달되며, 로그는 남기되 변경되지 않습니다.",
+            "port_label": "포트",
+            "port_hint": "로컬호스트 전용. 게이트웨이를 재시작해 적용하세요.",
+            "bound_to": "바인딩",
+            "internal_badge": "내부 빌드 전용",
+            "status_running": "실행 중",
+            "status_stopped": "중지됨"
+        },
         "cli_sync": {
             "title": "CLI 설정 동기화",
             "desc": "API 엔드포인트와 키를 Claude Code CLI에 동기화.",
@@ -967,6 +986,15 @@
             "synced": "동기화 완료",
             "sync_now": "지금 동기화",
             "lan_snippet": "LAN settings.json 설정"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "테스트",
+            "connected": "연결됨",
+            "not_configured": "미설정",
+            "test_failed": "실패",
+            "not_tested": "테스트되지 않음"
         }
     },
     "task": {
@@ -976,6 +1004,7 @@
         "paused": "일시 중지",
         "done": "완료",
         "failed": "실패",
+        "aborted": "중단됨",
         "pause": "일시 중지",
         "resume": "재개",
         "abort": "중단",

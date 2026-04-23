@@ -24,3 +24,4 @@ Thumbs.db
 
 # Internal plan documents (never publish)
 docs/plans/
+src-tauri/resources/webapp/

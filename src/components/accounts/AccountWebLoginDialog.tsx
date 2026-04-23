@@ -13,59 +13,14 @@ import type { Account } from '../../types/account';
 interface AccountWebLoginDialogProps {
   account: Account;
   onClose: () => void;
-  onDone: () => void;
 }
 
-export default function AccountWebLoginDialog({ account, onClose, onDone }: AccountWebLoginDialogProps) {
+export default function AccountWebLoginDialog({ account, onClose }: AccountWebLoginDialogProps) {
   const { t } = useTranslation();
   const taskId = `web-login-${account.accountId}`;
 
-  const task = useTaskDialog({
-    taskId,
-    onEvent: (type, data) => {
-      if (type === 'meta') {
-        const meta = data?.data || data;
-        invoke('update_account_profile', {
-          accountId: account.accountId,
-          email: meta?.email || null,
-          accountUuid: meta?.accountUuid || null,
-          orgId: meta?.orgId || null,
-          fullName: meta?.fullName || null,
-          subscriptionType: meta?.subscriptionType || null,
-          rateLimitTier: meta?.rateLimitTier || null,
-          billingType: meta?.billingType || null,
-        }).then(() => onDone()).catch(() => {});
-      }
-      if (type === 'cookies' && data.sessionKey) {
-        invoke('update_web_login', {
-          accountId: account.accountId,
-          cookies: data.cookies || [],
-          sessionKey: data.sessionKey,
-          proxy: null,
-        }).catch((e: any) => console.error('Failed to save cookies:', e));
-      }
-      if (type === 'result' && data.success) {
-        invoke('update_web_login', {
-          accountId: account.accountId,
-          cookies: data.data?.cookies || [],
-          sessionKey: data.data?.sessionKey || '',
-          proxy: data.data?.proxy || null,
-        }).catch((e: any) => console.error('Failed to update web login:', e));
-        // Update profile info (email etc. may be empty at add time)
-        invoke('update_account_profile', {
-          accountId: account.accountId,
-          email: data.data?.email || null,
-          accountUuid: data.data?.accountUuid || null,
-          orgId: data.data?.orgId || null,
-          fullName: data.data?.fullName || null,
-          subscriptionType: data.data?.subscriptionType || null,
-          rateLimitTier: data.data?.rateLimitTier || null,
-          billingType: data.data?.billingType || null,
-        }).catch(() => {});
-      }
-    },
-    onDone,
-  });
+  // Writes handled by Rust subprocess.rs; list refresh via App.tsx account://changed. Display-only.
+  const task = useTaskDialog({ taskId });
 
   const preflight = useWebappPreflight(task.status !== 'running' && task.status !== 'paused');
 
@@ -79,7 +34,7 @@ export default function AccountWebLoginDialog({ account, onClose, onDone }: Acco
   }, [account.accountId, task.resetForNewRun]);
 
   const statusIcon = task.status === 'paused' ? '\u23f8' : {
-    idle: '', running: '\ud83d\udfe2', done: '\u2705', failed: '\u274c',
+    idle: '', running: '\ud83d\udfe2', done: '\u2705', failed: '\u274c', aborted: '\u26d4',
   }[task.status];
 
   const statusText = task.status === 'paused' ? t('task.paused', 'Paused') : {
@@ -87,6 +42,7 @@ export default function AccountWebLoginDialog({ account, onClose, onDone }: Acco
     running: t('task.running', 'Running...'),
     done: t('task.done', 'Done'),
     failed: t('task.failed', 'Failed'),
+    aborted: t('task.aborted', 'Aborted'),
   }[task.status];
 
   return (
@@ -134,14 +90,14 @@ export default function AccountWebLoginDialog({ account, onClose, onDone }: Acco
             </div>
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="text-xs">{statusIcon}</span>
+                <span className={cn("text-xs", task.status === 'paused' && "text-yellow-400")}>{statusIcon}</span>
                 <span className="text-xs text-gray-400">{statusText}</span>
                 {task.error && (
                   <span className="text-xs text-red-500 max-w-[400px] whitespace-pre-line" title={task.error}>: {task.error}</span>
                 )}
               </div>
               <div className="flex items-center gap-1.5">
-                {(task.status === 'running' || task.status === 'paused') && (
+                {(task.status === 'running' || task.status === 'paused') && !task.hasResult && (
                   <>
                     <button
                       onClick={task.handlePauseResume}
@@ -199,7 +155,7 @@ export default function AccountWebLoginDialog({ account, onClose, onDone }: Acco
                 {t('task.startLogin', 'Start Login')}
               </button>
             )}
-            {(task.status === 'done' || task.status === 'failed') && (
+            {(task.status === 'done' || task.status === 'failed' || task.status === 'aborted') && (
               <button onClick={handleStart} disabled={!preflight.ready} className={cn("px-4 py-1.5 text-xs font-medium rounded-lg transition-colors flex items-center gap-1", preflight.ready ? "bg-blue-500 text-white hover:bg-blue-600" : "bg-gray-600 text-gray-400 cursor-not-allowed")}>
                 <Play className="w-3 h-3" />
                 {t('task.retryLogin', 'Retry Login')}

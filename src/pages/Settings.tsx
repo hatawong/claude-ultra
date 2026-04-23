@@ -61,6 +61,12 @@ function Settings() {
     proxy: { default_type: 'residential', residential: { host: 'geo.iproyal.com', port: 12321, username: '', password: '', default_country: 'us' }, mobile: { username: '', password: '', host: '', http_port: 0, socks5_port: 0, rotate_url: '' } },
     email: { domains: [], mailslurp_api_key: '', mailslurp_inbox_id: '' },
     sms: { api_key: '' },
+    registration: {
+      supported_countries: {
+        us: { sms_max_price: 0.51 },
+        ph: { sms_max_price: 0.51 },
+      },
+    },
   });
 
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);

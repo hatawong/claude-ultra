@@ -254,6 +254,8 @@
             "cli": "عميل CLI",
             "device": "الجهاز",
             "carrier": "شركة الاتصالات",
+            "country": "الدولة",
+            "country_updated": "تم تحديث الدولة",
             "last_activity": "آخر نشاط",
             "login": "تسجيل الدخول",
             "keepalive": "الحفاظ على الاتصال",
@@ -271,7 +273,8 @@
             "delete_account": "حذف الحساب",
             "oauth_reauth": "إعادة تفويض OAuth",
             "proxy_country": "الدولة",
-            "proxy_region": "المنطقة"
+            "proxy_region": "المنطقة",
+            "route_updated": "تم تحديث المسار"
         },
         "toast": {
             "proxy_enabled": "تم تفعيل الوكيل لـ {{count}} حساب",
@@ -353,7 +356,8 @@
             "last_used": "آخر استخدام",
             "actions": "إجراءات",
             "proxy": "البروكسي",
-            "last_activity": "آخر نشاط"
+            "last_activity": "آخر نشاط",
+            "route": "المسار"
         },
         "drag_to_reorder": "اسحب لإعادة الترتيب",
         "empty": {
@@ -414,7 +418,12 @@
         "import_failed": "فشل",
         "refresh_confirm_title": "تحديث الحصص",
         "refresh_confirm_all": "تحديث الحصة لجميع الحسابات الـ {{count}} التي لديها بيانات CLI؟",
-        "refresh_confirm_selected": "تحديث الحصة لـ {{count}} حساب(ات) محددة؟"
+        "refresh_confirm_selected": "تحديث الحصة لـ {{count}} حساب(ات) محددة؟",
+        "route": {
+            "proxy": "بروكسي",
+            "direct": "مباشر",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "حفظ الإعدادات",
@@ -1045,6 +1054,16 @@
             "placeholder": "(نفس مفتاح API)",
             "hint": "لنشر Docker/الويب. عيّن كلمة مرور تسجيل دخول منفصلة لتحسين أمان مفتاح API."
         },
+        "transparent": {
+            "title": "منفذ التدقيق الشفاف",
+            "description": "عند التفعيل يتم تمرير جميع الطلبات على هذا المنفذ إلى Anthropic كما هي، مع التسجيل فقط دون تعديل.",
+            "port_label": "المنفذ",
+            "port_hint": "المضيف المحلي فقط. أعد تشغيل البوابة للتطبيق.",
+            "bound_to": "مرتبط بـ",
+            "internal_badge": "داخلي فقط",
+            "status_running": "قيد التشغيل",
+            "status_stopped": "متوقف"
+        },
         "cli_sync": {
             "title": "مزامنة تكوين CLI",
             "desc": "مزامنة سريعة لنقطة نهاية API والمفتاح إلى Claude Code CLI المحلي.",
@@ -1057,6 +1076,15 @@
             "synced": "تمت المزامنة",
             "sync_now": "مزامنة الآن",
             "lan_snippet": "مقتطف settings.json للشبكة المحلية"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "اختبار",
+            "connected": "متصل",
+            "not_configured": "غير مهيأ",
+            "test_failed": "فشل",
+            "not_tested": "لم يتم الاختبار"
         }
     },
     "task": {
@@ -1066,6 +1094,7 @@
         "paused": "متوقف مؤقتاً",
         "done": "تم",
         "failed": "فشل",
+        "aborted": "أُلغي",
         "pause": "إيقاف مؤقت",
         "resume": "استئناف",
         "abort": "إلغاء",

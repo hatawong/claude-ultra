@@ -5,6 +5,7 @@ export interface AppConfig {
   proxy: ProxyConfig;
   email: EmailConfig;
   sms: SmsConfig;
+  registration: RegistrationConfig;
 }
 
 export interface UiConfig {
@@ -29,6 +30,10 @@ export interface GatewayConfig {
   auto_start: boolean;
   admin_password: string;
   enable_logging: boolean;
+  vercel_api_key: string;
+  // internal-only (present only on internal builds)
+  transparent_enabled?: boolean;
+  transparent_port?: number;
 }
 
 export interface ProxyConfig {
@@ -62,4 +67,12 @@ export interface EmailConfig {
 
 export interface SmsConfig {
   api_key: string;
+}
+
+export interface CountryConfig {
+  sms_max_price: number;
+}
+
+export interface RegistrationConfig {
+  supported_countries: Record<string, CountryConfig>;
 }

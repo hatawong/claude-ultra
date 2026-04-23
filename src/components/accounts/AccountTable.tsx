@@ -13,6 +13,7 @@ import {
   getLastActivity,
 } from '../../types/account';
 import { cn } from '../../utils/cn';
+import { useConfigStore } from '../../stores/useConfigStore';
 
 interface AccountTableProps {
   accounts: Account[];
@@ -28,7 +29,8 @@ interface AccountTableProps {
   onToggleProxy: (account: Account) => void;
   onWebLogin: (account: Account) => void;
   onWebOAuth: (account: Account) => void;
-  runningWebLogins?: Set<string>;
+  runningWebLogin?: Set<string>;
+  runningWebOAuth?: Set<string>;
   onToast: (msg: string) => void;
   refreshingQuota?: Set<string>;
   onRefreshQuota?: (accountId: string) => void;
@@ -38,7 +40,7 @@ function AccountTable({
   accounts, loading, selectedIds,
   onToggleSelect, onSelectAll, onClearSelection,
   onViewDetails, onEditLabel, onExportSingle, onDelete,
-  onToggleProxy, onWebLogin, onWebOAuth, runningWebLogins, onToast, refreshingQuota, onRefreshQuota,
+  onToggleProxy, onWebLogin, onWebOAuth, runningWebLogin, runningWebOAuth, onToast, refreshingQuota, onRefreshQuota,
 }: AccountTableProps) {
   const { t } = useTranslation();
 
@@ -78,8 +80,8 @@ function AccountTable({
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider w-[340px]">
               {t('accounts.table.quota', 'Quota')}
             </th>
-            <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider w-[80px]">
-              {t('accounts.table.proxy', 'Proxy')}
+            <th className="px-3 py-2 pl-[27px] text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider w-[100px]">
+              {t('accounts.table.route', 'Route')}
             </th>
             <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider w-[90px]">
               {t('accounts.table.last_activity', 'Last Activity')}
@@ -103,7 +105,8 @@ function AccountTable({
               onToggleProxy={() => onToggleProxy(account)}
               onWebLogin={() => onWebLogin(account)}
               onWebOAuth={() => onWebOAuth(account)}
-              isWebLoginRunning={runningWebLogins?.has(account.accountId)}
+              isWebLoginRunning={runningWebLogin?.has(account.accountId)}
+              isWebOAuthRunning={runningWebOAuth?.has(account.accountId)}
               onToast={onToast}
               quota={account.utilization}
               isRefreshing={refreshingQuota?.has(account.accountId)}
@@ -130,6 +133,7 @@ interface AccountRowProps {
   onWebLogin: () => void;
   onWebOAuth: () => void;
   isWebLoginRunning?: boolean;
+  isWebOAuthRunning?: boolean;
   onToast: (msg: string) => void;
   quota?: Utilization | null;
   isRefreshing?: boolean;
@@ -139,7 +143,7 @@ interface AccountRowProps {
 function AccountRow({
   account, selected, onToggleSelect,
   onViewDetails, onEditLabel, onExportSingle, onDelete,
-  onToggleProxy, onWebLogin, onWebOAuth, isWebLoginRunning, onToast: _onToast, quota, isRefreshing, onRefreshQuota,
+  onToggleProxy, onWebLogin, onWebOAuth, isWebLoginRunning, isWebOAuthRunning, onToast: _onToast, quota, isRefreshing, onRefreshQuota,
 }: AccountRowProps) {
   const { t } = useTranslation();
   const planLabel = getPlanLabel(account);
@@ -223,13 +227,7 @@ function AccountRow({
 
       {/* Col 4: Proxy */}
       <td className="px-3 py-2">
-        {account.proxy ? (
-          <ProxyDot proxy={account.proxy} t={t} />
-        ) : (
-          <span className="inline-flex items-center justify-center w-6 h-6">
-            <span className="inline-block w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600" />
-          </span>
-        )}
+        <RouteLabel account={account} />
       </td>
 
       {/* Col 5: Last Activity — 2 rows: date + time */}
@@ -266,6 +264,7 @@ function AccountRow({
               onClick={onWebOAuth}
               hoverColor="amber"
               urgent={!!(account.cli && account.cli.expiresAt < Date.now())}
+              active={isWebOAuthRunning}
             />
             <ActionBtn
               icon={Globe}
@@ -308,70 +307,6 @@ const hoverColors: Record<string, string> = {
 
 // ─── Proxy Dot with instant tooltip ────────────────────────────
 
-function ProxyDot({ proxy, t }: { proxy: NonNullable<Account['proxy']>; t: (key: string, fallback: string) => string }) {
-  const [show, setShow] = useState(false);
-  const [dropDown, setDropDown] = useState(false);
-  const ref = useRef<HTMLSpanElement>(null);
-  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-
-  return (
-    <span
-      ref={ref}
-      className="relative inline-flex items-center justify-center w-6 h-6 cursor-default"
-      onMouseEnter={() => {
-        clearTimeout(hideTimer.current);
-        if (ref.current) {
-          const rect = ref.current.getBoundingClientRect();
-          setDropDown(rect.top < 200);
-        }
-        setShow(true);
-      }}
-      onMouseLeave={() => { hideTimer.current = setTimeout(() => setShow(false), 200); }}
-    >
-      <span className="inline-block w-2 h-2 rounded-full bg-green-500" />
-      {show && (
-        <div
-          className={cn(
-            "absolute z-50 left-1/2 -translate-x-1/2 px-4 py-3 bg-white dark:bg-base-100 rounded-xl shadow-2xl border border-gray-200 dark:border-base-300 whitespace-nowrap",
-            dropDown ? "top-full mt-1.5" : "bottom-full mb-1.5",
-          )}
-          onMouseEnter={() => { clearTimeout(hideTimer.current); }}
-          onMouseLeave={() => { hideTimer.current = setTimeout(() => setShow(false), 200); }}
-        >
-          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-            <span className="text-gray-500 dark:text-gray-400">IP</span>
-            <span className="text-gray-900 dark:text-gray-200">{proxy.lastIp || '\u2014'}</span>
-            <span className="text-gray-500 dark:text-gray-400">{t('accounts.details.proxy_country', 'Country')}</span>
-            <span className="text-gray-900 dark:text-gray-200">{proxy.country || '\u2014'}</span>
-            <span className="text-gray-500 dark:text-gray-400">ISP</span>
-            <span className="text-gray-900 dark:text-gray-200">{proxy.isp || '\u2014'}</span>
-            {(proxy.region || proxy.city) && (
-              <>
-                <span className="text-gray-500 dark:text-gray-400">{t('accounts.details.proxy_region', 'Region')}</span>
-                <span className="text-gray-900 dark:text-gray-200">{[proxy.region, proxy.city].filter(Boolean).join(' \u00b7 ')}</span>
-              </>
-            )}
-            <span className="text-gray-500 dark:text-gray-400">Session</span>
-            <span className="text-gray-900 dark:text-gray-200 ">{proxy.sessionId}</span>
-            <span className="text-gray-500 dark:text-gray-400">{t('accounts.details.quality', 'Quality')}</span>
-            <span className="text-gray-900 dark:text-gray-200">{proxy.quality || '\u2014'}</span>
-            {proxy.lastChecked && (
-              <>
-                <span className="text-gray-500 dark:text-gray-400">{t('accounts.details.last_checked', 'Last Checked')}</span>
-                <span className="text-gray-900 dark:text-gray-200 ">{new Date(proxy.lastChecked).toLocaleString()}</span>
-              </>
-            )}
-          </div>
-          <div className={cn(
-            "absolute left-1/2 -translate-x-1/2 border-4 border-transparent",
-            dropDown ? "bottom-full border-b-white dark:border-b-base-100" : "top-full border-t-white dark:border-t-base-100",
-          )} />
-        </div>
-      )}
-    </span>
-  );
-}
-
 // ─── ActionBtn ──────────────────────────────────────────────
 
 function ActionBtn({ icon: Icon, title, onClick, hoverColor, active, spinning, urgent }: {
@@ -405,5 +340,143 @@ function ActionBtn({ icon: Icon, title, onClick, hoverColor, active, spinning, u
     </button>
   );
 }
+
+type RouteType = 'proxy' | 'vercel' | 'direct';
+
+function RouteLabel({ account }: { account: Account }) {
+  const config = useConfigStore((s) => s.config);
+  const mode = (account.routeMode || 'proxy').toLowerCase();
+  const routeCountry = (account.routeCountry || account.country || account.region || 'us').toLowerCase();
+  const proxyAvailable = !!config?.proxy?.residential?.username && !!config?.proxy?.residential?.password;
+  const vercelAvailable = !!config?.gateway?.vercel_api_key;
+
+  let isFallback = false;
+
+  // Mirror of gateway/route.rs::resolve_route() — keep in sync
+  const resolve = (): RouteType => {
+    if (!proxyAvailable && !vercelAvailable) { isFallback = mode !== 'direct'; return 'direct'; }
+    if (mode === 'proxy') {
+      if (proxyAvailable) return 'proxy';
+      if (vercelAvailable) { isFallback = true; return 'vercel'; }
+      isFallback = true; return 'direct';
+    }
+    if (mode === 'vercel') {
+      if (vercelAvailable) return 'vercel';
+      if (proxyAvailable) { isFallback = true; return 'proxy'; }
+      isFallback = true; return 'direct';
+    }
+    if (mode === 'direct') return 'direct';
+    // unknown mode → proxy chain
+    if (proxyAvailable) { isFallback = true; return 'proxy'; }
+    if (vercelAvailable) { isFallback = true; return 'vercel'; }
+    isFallback = true; return 'direct';
+  };
+  const routeType = resolve();
+
+  const label = routeType === 'proxy'
+    ? `Proxy/${routeCountry.toUpperCase()}`
+    : routeType === 'vercel'
+      ? 'Vercel'
+      : 'Direct';
+
+  return (
+    <RouteTooltip account={account} routeType={routeType} isFallback={isFallback} mode={mode}>
+      {isFallback
+        ? <span className="inline-flex items-center justify-center w-4 h-4 text-[10px] leading-none">⚠️</span>
+        : routeType === 'proxy' && account.proxy ? <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-green-500" /></span>
+        : routeType === 'proxy' ? <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600" /></span>
+        : routeType === 'vercel' ? <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-blue-500" /></span>
+        : <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-yellow-500" /></span>
+      }
+      <span className={cn(
+        "text-xs font-medium whitespace-nowrap",
+        isFallback ? "text-amber-600 dark:text-amber-400" : "text-gray-700 dark:text-gray-300"
+      )}>
+        {label}
+      </span>
+    </RouteTooltip>
+  );
+}
+
+function RouteTooltip({ account, routeType, isFallback, mode, children }: {
+  account: Account; routeType: RouteType; isFallback: boolean; mode: string;
+  children: React.ReactNode;
+}) {
+  const [show, setShow] = useState(false);
+  const [pos, setPos] = useState<{ top: number; left: number; below: boolean }>({ top: 0, left: 0, below: true });
+  const ref = useRef<HTMLDivElement>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const tooltipRows: [string, string][] = [];
+
+  if (isFallback) {
+    tooltipRows.push(['Intent', mode.charAt(0).toUpperCase() + mode.slice(1)]);
+    tooltipRows.push(['Actual', `${routeType.charAt(0).toUpperCase() + routeType.slice(1)} (fallback)`]);
+  }
+
+  if (routeType === 'proxy' && account.proxy) {
+    tooltipRows.push(['IP', account.proxy.lastIp || '\u2014']);
+    tooltipRows.push(['Country', account.proxy.country || '\u2014']);
+    tooltipRows.push(['ISP', account.proxy.isp || '\u2014']);
+    if (account.proxy.region || account.proxy.city) {
+      tooltipRows.push(['Region', [account.proxy.region, account.proxy.city].filter(Boolean).join(' \u00b7 ')]);
+    }
+    tooltipRows.push(['Session', account.proxy.sessionId || '\u2014']);
+    tooltipRows.push(['Quality', account.proxy.quality || '\u2014']);
+  } else if (routeType === 'vercel') {
+    tooltipRows.push(['Provider', 'Vercel AI Gateway']);
+    tooltipRows.push(['Mode', 'BYOK (subscription proxy)']);
+    tooltipRows.push(['Endpoint', 'ai-gateway.vercel.sh']);
+  } else if (routeType === 'direct') {
+    tooltipRows.push(['Provider', 'Anthropic (direct)']);
+    tooltipRows.push(['Proxy', 'None']);
+  }
+
+  if (!tooltipRows.length) return <div className="flex items-center gap-1.5">{children}</div>;
+
+  return (
+    <div
+      ref={ref}
+      className="relative flex items-center gap-1.5 cursor-default"
+      onMouseEnter={() => {
+        clearTimeout(hideTimer.current);
+        if (ref.current) {
+          const rect = ref.current.getBoundingClientRect();
+          const below = rect.top < 200;
+          setPos({
+            top: below ? rect.bottom + 6 : rect.top - 6,
+            left: rect.left,
+            below,
+          });
+        }
+        setShow(true);
+      }}
+      onMouseLeave={() => { hideTimer.current = setTimeout(() => setShow(false), 200); }}
+    >
+      {children}
+      {show && (
+        <div
+          className="fixed z-[100] px-4 py-3 bg-white dark:bg-base-100 rounded-xl shadow-2xl border border-gray-200 dark:border-base-300 whitespace-nowrap"
+          style={pos.below
+            ? { top: pos.top, left: pos.left }
+            : { bottom: window.innerHeight - pos.top, left: pos.left }
+          }
+          onMouseEnter={() => { clearTimeout(hideTimer.current); }}
+          onMouseLeave={() => { hideTimer.current = setTimeout(() => setShow(false), 200); }}
+        >
+          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+            {tooltipRows.map(([k, v], i) => (
+              <React.Fragment key={i}>
+                <span className="text-gray-500 dark:text-gray-400">{k}</span>
+                <span className="text-gray-900 dark:text-gray-200">{v}</span>
+              </React.Fragment>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 export default AccountTable;

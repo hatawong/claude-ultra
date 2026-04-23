@@ -254,6 +254,8 @@
             "cli": "Cliente CLI",
             "device": "Dispositivo",
             "carrier": "Operador",
+            "country": "País",
+            "country_updated": "País actualizado",
             "last_activity": "Última Actividad",
             "login": "Inicio de Sesión",
             "keepalive": "Keepalive",
@@ -271,7 +273,8 @@
             "delete_account": "Eliminar Cuenta",
             "oauth_reauth": "Reautorizar OAuth",
             "proxy_country": "País",
-            "proxy_region": "Región"
+            "proxy_region": "Región",
+            "route_updated": "Ruta actualizada"
         },
         "toast": {
             "proxy_enabled": "Proxy habilitado para {{count}} cuentas",
@@ -353,7 +356,8 @@
             "last_used": "Último Uso",
             "actions": "Acciones",
             "proxy": "Proxy",
-            "last_activity": "Última Actividad"
+            "last_activity": "Última Actividad",
+            "route": "Ruta"
         },
         "drag_to_reorder": "Arrastrar para reordenar",
         "empty": {
@@ -414,7 +418,12 @@
         },
         "refresh_confirm_title": "Actualizar Cuotas",
         "refresh_confirm_all": "¿Actualizar cuota de las {{count}} cuentas con credenciales CLI?",
-        "refresh_confirm_selected": "¿Actualizar cuota de {{count}} cuenta(s) seleccionada(s)?"
+        "refresh_confirm_selected": "¿Actualizar cuota de {{count}} cuenta(s) seleccionada(s)?",
+        "route": {
+            "proxy": "Proxy",
+            "direct": "Directo",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "Guardar Configuración",
@@ -914,6 +923,16 @@
             "placeholder": "(Igual que la Clave API)",
             "hint": "Para despliegue Docker/Web. Establezca una contraseña de inicio de sesión separada para mejorar la seguridad de la clave API."
         },
+        "transparent": {
+            "title": "Puerto de auditoría transparente",
+            "description": "Cuando está habilitado, todas las solicitudes en este puerto se reenvían a Anthropic sin modificaciones y solo se registran.",
+            "port_label": "Puerto",
+            "port_hint": "Solo localhost. Reinicia el gateway para aplicar.",
+            "bound_to": "Vinculado a",
+            "internal_badge": "Solo interno",
+            "status_running": "En ejecución",
+            "status_stopped": "Detenido"
+        },
         "cli_sync": {
             "title": "Sincronización de Config CLI",
             "desc": "Sincronice rápidamente el endpoint API y la clave con su CLI local de Claude Code.",
@@ -926,6 +945,15 @@
             "synced": "Sincronizado",
             "sync_now": "Sincronizar Ahora",
             "lan_snippet": "Fragmento LAN settings.json"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "Probar",
+            "connected": "Conectado",
+            "not_configured": "No configurado",
+            "test_failed": "Fallido",
+            "not_tested": "No probado"
         }
     },
     "security": {
@@ -1063,6 +1091,7 @@
         "paused": "Pausado",
         "done": "Completado",
         "failed": "Fallido",
+        "aborted": "Abortado",
         "pause": "Pausar",
         "resume": "Reanudar",
         "abort": "Cancelar",

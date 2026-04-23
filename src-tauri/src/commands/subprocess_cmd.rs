@@ -5,16 +5,18 @@ use crate::subprocess;
 
 /// Helper: ensure no old subprocess is running for this task_id.
 pub(super) async fn abort_if_running(mgr: &subprocess::SubprocessManager, task_id: &str) -> Result<(), String> {
-    if !mgr.is_running(task_id) { return Ok(()); }
+    if !mgr.is_running(task_id).await { return Ok(()); }
 
-    let _ = mgr.abort(task_id).await;
+    if let Err(e) = mgr.abort(task_id).await {
+        tracing::warn!("[abort_if_running:{}] abort returned err: {}", task_id, e);
+    }
 
     for _ in 0..20 {
-        if !mgr.is_running(task_id) { return Ok(()); }
+        if !mgr.is_running(task_id).await { return Ok(()); }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    if mgr.is_running(task_id) {
+    if mgr.is_running(task_id).await {
         return Err(format!("Failed to stop old subprocess {}", task_id));
     }
     Ok(())
@@ -26,15 +28,17 @@ pub async fn start_oauth(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, GatewayServiceState>,
 ) -> Result<String, String> {
-    let _account = state.account_manager.read(&account_id).await?;
+    let account = state.account_manager.read(&account_id).await?;
+    let country = account.resolve_country();
 
     let (command, mut args) = subprocess::get_webapp_command();
     args.push("oauth".to_string());
     args.push(format!("--id={}", account_id));
     args.push("--app=manager".to_string());
     args.push("--auto".to_string());
+    args.push(format!("--country={}", country));
 
-    let task_id = format!("oauth-{}", account_id);
+    let task_id = format!("web-oauth-{}", account_id);
     abort_if_running(&state.subprocess_manager, &task_id).await?;
 
     state
@@ -43,7 +47,7 @@ pub async fn start_oauth(
             task_id.clone(),
             account_id,
             subprocess::SubprocessType::Webapp,
-            "oauth".to_string(),
+            "web-oauth".to_string(),
             &command,
             args,
             app_handle,
@@ -61,13 +65,15 @@ pub async fn start_web_login(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, GatewayServiceState>,
 ) -> Result<String, String> {
-    let _account = state.account_manager.read(&account_id).await?;
+    let account = state.account_manager.read(&account_id).await?;
+    let country = account.resolve_country();
 
     let (command, mut args) = subprocess::get_webapp_command();
     args.push("login".to_string());
     args.push(format!("--id={}", account_id));
     args.push("--app=manager".to_string());
     args.push("--auto".to_string());
+    args.push(format!("--country={}", country));
 
     let task_id = format!("web-login-{}", account_id);
     abort_if_running(&state.subprocess_manager, &task_id).await?;
@@ -95,7 +101,9 @@ pub async fn pause_subprocess(
     task_id: String,
     state: tauri::State<'_, GatewayServiceState>,
 ) -> Result<(), String> {
-    state.subprocess_manager.send_stdin(&task_id, r#"{"type":"pause"}"#).await
+    state.subprocess_manager.send_stdin(&task_id, r#"{"type":"pause"}"#).await?;
+    state.subprocess_manager.mark_paused(&task_id).await;
+    Ok(())
 }
 
 /// Resume a paused subprocess.
@@ -104,7 +112,9 @@ pub async fn resume_subprocess(
     task_id: String,
     state: tauri::State<'_, GatewayServiceState>,
 ) -> Result<(), String> {
-    state.subprocess_manager.send_stdin(&task_id, r#"{"type":"resume"}"#).await
+    state.subprocess_manager.send_stdin(&task_id, r#"{"type":"resume"}"#).await?;
+    state.subprocess_manager.mark_resumed(&task_id).await;
+    Ok(())
 }
 
 /// Check if a subprocess task is still running.
@@ -113,7 +123,7 @@ pub async fn is_subprocess_running(
     task_id: String,
     state: tauri::State<'_, GatewayServiceState>,
 ) -> Result<bool, String> {
-    Ok(state.subprocess_manager.is_running(&task_id))
+    Ok(state.subprocess_manager.is_running(&task_id).await)
 }
 
 /// Abort a running subprocess.
@@ -163,12 +173,38 @@ pub async fn clear_subprocess_log(task_id: String) -> Result<(), String> {
     Ok(())
 }
 
-/// List all running subprocesses.
+/// Get Task snapshot by task_id (returns None if never spawned).
 #[tauri::command]
-pub async fn list_subprocesses(
+pub async fn get_task(
+    task_id: String,
     state: tauri::State<'_, GatewayServiceState>,
-) -> Result<Vec<subprocess::SubprocessInfo>, String> {
-    Ok(state.subprocess_manager.list_running())
+) -> Result<Option<serde_json::Value>, String> {
+    match state.subprocess_manager.get_task(&task_id) {
+        Some(task_arc) => {
+            let t = task_arc.read().await;
+            Ok(Some(serde_json::to_value(&*t).unwrap_or_default()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// List all Task snapshots (includes exited tasks with final status).
+#[tauri::command]
+pub async fn list_tasks(
+    state: tauri::State<'_, GatewayServiceState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    // Collect Arcs first to release DashMap shard guards before .await on each RwLock.
+    // Holding iter() shard read lock across .await risks blocking concurrent inserts
+    // (stdout watcher) on the same shard and degrading to a serialized bottleneck.
+    let tasks = state.subprocess_manager.tasks();
+    let arcs: Vec<std::sync::Arc<tokio::sync::RwLock<crate::subprocess::SubprocessTask>>> =
+        tasks.iter().map(|e| e.value().clone()).collect();
+    let mut out = Vec::new();
+    for arc in arcs {
+        let t = arc.read().await;
+        out.push(serde_json::to_value(&*t).unwrap_or_default());
+    }
+    Ok(out)
 }
 
 /// Pre-flight check for webapp prerequisites.

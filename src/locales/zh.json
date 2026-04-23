@@ -58,6 +58,7 @@
     "paused": "已暂停",
     "done": "完成",
     "failed": "失败",
+    "aborted": "已中止",
     "pause": "暂停",
     "resume": "恢复",
     "abort": "终止",
@@ -290,6 +291,8 @@
       "cli": "CLI 客户端",
       "device": "设备",
       "carrier": "运营商",
+      "country": "国家",
+      "country_updated": "国家已更新",
       "last_activity": "最后活动",
       "login": "登录",
       "keepalive": "保活",
@@ -307,7 +310,8 @@
       "delete_account": "删除账号",
       "oauth_reauth": "OAuth 重新授权",
       "proxy_country": "国家",
-      "proxy_region": "地区"
+      "proxy_region": "地区",
+      "route_updated": "路由已更新"
     },
     "toast": {
       "proxy_enabled": "成功启用 {{count}} 个账号的反代功能",
@@ -389,7 +393,8 @@
       "last_used": "最后使用",
       "actions": "操作",
       "proxy": "代理",
-      "last_activity": "最后活动"
+      "last_activity": "最后活动",
+      "route": "路由"
     },
     "drag_to_reorder": "拖拽排序",
     "empty": {
@@ -422,7 +427,12 @@
     "max": "Max",
     "refresh_confirm_title": "刷新配额",
     "refresh_confirm_all": "刷新全部 {{count}} 个有 CLI 凭证的账号配额？",
-    "refresh_confirm_selected": "刷新 {{count}} 个已选账号的配额？"
+    "refresh_confirm_selected": "刷新 {{count}} 个已选账号的配额？",
+    "route": {
+      "proxy": "代理",
+      "direct": "直连",
+      "vercel": "Vercel"
+    }
   },
   "settings": {
     "save": "保存设置",
@@ -1047,6 +1057,16 @@
       "placeholder": "（同 API 密钥）",
       "hint": "提示：在 Docker/Web 部署场景中，您可以设置一个独立的登录密码，提高 API 密钥的安全性。"
     },
+    "transparent": {
+      "title": "透明审计端口",
+      "description": "启用后, 此端口的所有请求将原样透传给 Anthropic, 仅记录日志, 不改写。",
+      "port_label": "端口",
+      "port_hint": "仅限本机访问, 重启网关生效。",
+      "bound_to": "绑定",
+      "internal_badge": "仅内部版本",
+      "status_running": "运行中",
+      "status_stopped": "已停止"
+    },
     "cli_sync": {
       "title": "CLI 配置一键同步",
       "desc": "快速将当前 API 服务地址与 API 密钥同步到本地 Claude Code CLI 工具中。",
@@ -1059,6 +1079,15 @@
       "synced": "已同步",
       "sync_now": "立即同步",
       "lan_snippet": "局域网 settings.json 片段"
+    },
+    "vercel": {
+      "title": "Vercel AI Gateway",
+      "api_key": "API Key",
+      "test": "测试连接",
+      "connected": "已连接",
+      "not_configured": "未配置",
+      "test_failed": "连接失败",
+      "not_tested": "未测试"
     }
   },
   "auth": {

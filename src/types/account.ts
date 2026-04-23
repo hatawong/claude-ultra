@@ -85,7 +85,12 @@ export interface Account {
   accountUuid: string;
   orgId: string;
   region: string;
+  country?: string;
   createdAt: number;
+
+  // Routing (per-account)
+  routeMode: string;        // "proxy" | "direct" | "vercel"
+  routeCountry?: string;    // proxy target country, null = follow registration country
 
   // Plan
   subscriptionType: string;
@@ -94,6 +99,9 @@ export interface Account {
   subscriptionCreatedAt: number | null;
   billingType: string | null;
   hasExtraUsageEnabled: boolean;
+
+  // Login method
+  loginMethod: string;
 
   // Status
   disabled: boolean;

@@ -50,35 +50,44 @@ impl Default for PoolConfig {
 
 // ─── GeoPolicy ─────────────────────────────────────────────
 
-/// Geo-verification policy.
+/// Check if IP service returned country matches target ISO code.
+/// Supports ISO 3166-1 alpha-2 lowercase and common full-name variants.
+pub fn country_matches(expected_iso: &str, actual: &str) -> bool {
+    let expected = expected_iso.to_lowercase();
+    let actual = actual.to_lowercase();
+    if expected == actual { return true; }
+    // ISO code → full name mapping
+    let aliases: &[(&str, &[&str])] = &[
+        ("us", &["united states", "united states of america"]),
+        ("ph", &["philippines", "republic of the philippines"]),
+        ("jp", &["japan"]),
+        ("kr", &["south korea", "korea, republic of"]),
+        ("gb", &["united kingdom"]),
+        ("uk", &["united kingdom"]),
+        ("de", &["germany"]),
+        ("fr", &["france"]),
+        ("au", &["australia"]),
+        ("ca", &["canada"]),
+        ("sg", &["singapore"]),
+    ];
+    for (code, names) in aliases {
+        if expected == *code && names.contains(&actual.as_str()) { return true; }
+        if names.contains(&expected.as_str()) && *code == actual { return true; }
+    }
+    false
+}
+
+/// Fallback geo policy — only used when an account has no country set and ProxyPool
+/// needs a default (e.g. initial allocation for historical accounts).
 #[derive(Debug, Clone)]
 pub struct GeoPolicy {
     pub expected_country: String,
 }
 
 impl GeoPolicy {
-    /// Check if country matches (supports ISO code "US" and full name "United States").
+    /// Backward-compat wrapper — delegates to top-level country_matches.
     pub fn country_matches(&self, country: &str) -> bool {
-        let expected = self.expected_country.to_lowercase();
-        let actual = country.to_lowercase();
-        if expected == actual { return true; }
-        // ISO code → full name mapping (common)
-        let aliases: &[(&str, &[&str])] = &[
-            ("us", &["united states", "united states of america"]),
-            ("jp", &["japan"]),
-            ("kr", &["south korea", "korea, republic of"]),
-            ("gb", &["united kingdom"]),
-            ("de", &["germany"]),
-            ("fr", &["france"]),
-            ("au", &["australia"]),
-            ("ca", &["canada"]),
-            ("sg", &["singapore"]),
-        ];
-        for (code, names) in aliases {
-            if expected == *code && names.contains(&actual.as_str()) { return true; }
-            if names.contains(&expected.as_str()) && *code == actual { return true; }
-        }
-        false
+        country_matches(&self.expected_country, country)
     }
 }
 
@@ -179,6 +188,8 @@ pub struct AccountProxy {
     pub avg_connect_ms: f64,
     pub failure_streak: u32,
     pub last_active_at: Instant,
+    /// Target country (ISO 3166-1 alpha-2, lowercase). Used for proxy allocation + geo check.
+    pub country: String,
 }
 
 // ─── ReleaseMsg ────────────────────────────────────────────
@@ -334,9 +345,31 @@ impl ProxyPool {
     }
 
     /// Ensure account has an active session. Lazily initialized on first request.
-    pub async fn ensure_proxy(self: &Arc<Self>, account_id: &str) -> Result<(), ProxyError> {
-        // Fast path
-        if self.accounts.contains_key(account_id) {
+    /// Country is resolved per-account: caller passes `Some("jp")` for the account's
+    /// target country, or `None` to fall back to the global GeoPolicy default.
+    ///
+    /// Consistency: when the account is already in the pool, compares `country_override`
+    /// against `state.country`. If they differ, synchronously switches (clears standby +
+    /// renews active session) before returning — guarantees caller's next acquire() uses
+    /// the new-country session, not the stale one.
+    pub async fn ensure_proxy(
+        self: &Arc<Self>,
+        account_id: &str,
+        country_override: Option<&str>,
+    ) -> Result<(), ProxyError> {
+        // Fast path: account already in pool. Verify country matches caller's override
+        // before returning — otherwise the caller would unwittingly use the old-country
+        // active session until the next maintain cycle.
+        if let Some(arc) = self.accounts.get(account_id).map(|r| r.clone()) {
+            if let Some(want) = country_override {
+                let want_lower = want.to_lowercase();
+                let current = arc.lock().await.country.clone();
+                if current != want_lower {
+                    // Delegates to update_account_country (holds switch_lock, clears
+                    // standby, renews active session). Idempotent — see its impl.
+                    self.update_account_country(account_id, &want_lower).await;
+                }
+            }
             return Ok(());
         }
 
@@ -349,15 +382,18 @@ impl ProxyPool {
 
         // Double-check
         if self.accounts.contains_key(account_id) {
-            return Ok(());
+            // Re-enter fast-path recursively — preserves country consistency check.
+            return Box::pin(self.ensure_proxy(account_id, country_override)).await;
         }
 
-        // Allocate and persist (using geo_policy country, consistent with standby)
-        let country = &self.geo_policy.expected_country;
+        // Resolve country: per-account override → global fallback
+        let country = country_override
+            .map(|s| s.to_lowercase())
+            .unwrap_or_else(|| self.geo_policy.expected_country.to_lowercase());
         let session = self.allocator.allocate(account_id).await
             .map_err(|e| ProxyError::Exhausted(e))?;
         let proxy_url = self.allocator.build_proxy_url_with_country(
-            &session.session_id, country,
+            &session.session_id, &country,
         );
 
         // user_disabled accounts enter Pool in disabled mode (verify_ip only, no standby maintenance)
@@ -379,6 +415,7 @@ impl ProxyPool {
                 avg_connect_ms: 0.0,
                 failure_streak: 0,
                 last_active_at: Instant::now(),
+                country,
             }
         )));
 
@@ -389,9 +426,15 @@ impl ProxyPool {
     }
 
     /// Acquire a proxy connection. Prefers idle_conns, otherwise creates new.
-    pub async fn acquire(self: &Arc<Self>, account_id: &str) -> Result<AcquireResult, ProxyError> {
+    /// `country_override` is forwarded to ensure_proxy (first-call allocation); None falls
+    /// back to the global GeoPolicy default.
+    pub async fn acquire(
+        self: &Arc<Self>,
+        account_id: &str,
+        country_override: Option<&str>,
+    ) -> Result<AcquireResult, ProxyError> {
         // 1. ensure_proxy
-        self.ensure_proxy(account_id).await?;
+        self.ensure_proxy(account_id, country_override).await?;
 
         // 2. Get account state (DashMap guard must not span .await)
         let arc = self.accounts.get(account_id)
@@ -663,19 +706,20 @@ impl ProxyPool {
         if state.disabled {
             let active_url = state.active.proxy_url.clone();
             let current_ip = state.active.session.last_ip.clone().unwrap_or_default();
+            let account_country = state.country.clone();
             drop(state);
 
             match self.allocator.verify_ip(&active_url).await {
                 Ok(info) => {
                     // country=None (e.g. ipify mode) → skip country check
                     let country_bad = info.country.as_deref()
-                        .map(|c| !self.geo_policy.country_matches(c))
+                        .map(|c| !country_matches(&account_country, c))
                         .unwrap_or(false);
                     if country_bad {
                         tracing::warn!("[POOL] disabled {} country mismatch ({:?}), renewing",
                             account_id, info.country);
                         // Disabled accounts have no standby, allocate new session directly
-                        let country = self.geo_policy.expected_country.clone();
+                        let country = account_country.clone();
                         if let Ok(session) = self.allocator.allocate_ephemeral(&country).await {
                             let proxy_url = self.allocator.build_proxy_url_with_country(
                                 &session.session_id, &country,
@@ -705,6 +749,7 @@ impl ProxyPool {
         let active_url = state.active.proxy_url.clone();
         let active_session_id = state.active.session.session_id.clone();
         let current_ip = state.active.session.last_ip.clone().unwrap_or_default();
+        let account_country = state.country.clone();
         // Build standby slot tasks
         let mut standby_urls: Vec<Option<String>> = Vec::new();
         for i in 0..self.config.max_standby_per_account {
@@ -713,7 +758,7 @@ impl ProxyPool {
         drop(state);
 
         let timeout = Duration::from_secs(20);
-        let country = self.geo_policy.expected_country.clone();
+        let country = account_country.clone();
 
         // ── Build 5 tasks ──
 
@@ -787,11 +832,11 @@ impl ProxyPool {
             if let Some(info) = &probe.ip_info {
                 // country=None (e.g. ipify mode) → skip country check
                 let country_mismatch = info.country.as_deref()
-                    .map(|c| !self.geo_policy.country_matches(c))
+                    .map(|c| !country_matches(&account_country, c))
                     .unwrap_or(false);
                 if country_mismatch {
                     tracing::warn!("[POOL] country mismatch for {}: expected {}, got {:?}, switching",
-                        account_id, self.geo_policy.expected_country, info.country);
+                        account_id, account_country, info.country);
                     self.try_switch_to_standby(account_id).await;
                     return;
                 }
@@ -867,7 +912,7 @@ impl ProxyPool {
                         if let Some(info) = &r.ip_info {
                             // country=None (e.g. ipify mode) → skip country check
                             let country_bad = info.country.as_deref()
-                                .map(|c| !self.geo_policy.country_matches(c))
+                                .map(|c| !country_matches(&account_country, c))
                                 .unwrap_or(false);
                             if country_bad {
                                 tracing::warn!("[POOL] standby country mismatch for {}, marking removal", url);
@@ -976,9 +1021,10 @@ impl ProxyPool {
             None => return,
         };
         let state = arc.lock().await;
+        let account_country = state.country.clone();
 
         if state.standby.is_empty() {
-            let country = self.geo_policy.expected_country.clone();
+            let country = account_country.clone();
             drop(state);
 
             match self.allocator.allocate_ephemeral(&country).await {
@@ -1039,7 +1085,7 @@ impl ProxyPool {
                 // Use the already-committed session directly, but without warm_conn
                 let old_checked_out = state.active.checked_out;
                 let proxy_url = self.allocator.build_proxy_url_with_country(
-                    &best_session_id, &self.geo_policy.expected_country,
+                    &best_session_id, &account_country,
                 );
                 state.active = ActiveSession {
                     session: best_session,
@@ -1059,11 +1105,41 @@ impl ProxyPool {
         self.try_switch_to_standby(account_id).await;
     }
 
+    /// Update the per-account target country. Called when user changes country in UI,
+    /// and also by ensure_proxy's consistency check when country_override mismatches.
+    /// Clears standby (old-country sessions become useless) and triggers renew_proxy
+    /// to swap active session to the new country immediately.
+    ///
+    /// Idempotent: if state.country already equals new_country, returns without touching
+    /// standby/active — avoids redundant renews under concurrent ensure_proxy callers.
+    ///
+    /// If the account isn't in pool yet, no-op — next request's ensure_proxy slow path
+    /// will allocate with the correct country directly.
+    pub async fn update_account_country(self: &Arc<Self>, account_id: &str, new_country: &str) {
+        let new_country = new_country.to_lowercase();
+        if let Some(arc) = self.accounts.get(account_id).map(|r| r.clone()) {
+            {
+                let mut state = arc.lock().await;
+                if state.country == new_country {
+                    return; // Already on target country — no-op.
+                }
+                state.country = new_country.clone();
+                state.standby.clear();
+            }
+            self.renew_proxy(account_id).await;
+            tracing::info!("[POOL] account {} country updated to {} + session renewed", account_id, new_country);
+        }
+    }
+
     /// Get the active session's proxy_url for an account.
     /// Used for non-api.anthropic.com requests (e.g. platform.claude.com token refresh).
     /// Internally auto-calls ensure_proxy — first call allocates session + starts maintain loop.
-    pub async fn get_active_proxy_url(self: &Arc<Self>, account_id: &str) -> Result<String, ProxyError> {
-        self.ensure_proxy(account_id).await?;
+    pub async fn get_active_proxy_url(
+        self: &Arc<Self>,
+        account_id: &str,
+        country_override: Option<&str>,
+    ) -> Result<String, ProxyError> {
+        self.ensure_proxy(account_id, country_override).await?;
         let arc = self.accounts.get(account_id)
             .map(|r| r.clone())
             .ok_or_else(|| ProxyError::Exhausted("account not in pool after ensure".to_string()))?;
@@ -1079,6 +1155,7 @@ impl ProxyPool {
 pub struct ProxyClient {
     pool: Arc<ProxyPool>,
     account_id: String,
+    country: Option<String>,
 }
 
 impl ProxyClient {
@@ -1086,11 +1163,13 @@ impl ProxyClient {
         ProxyRequestBuilder {
             pool: self.pool.clone(),
             account_id: self.account_id.clone(),
+            country: self.country.clone(),
             method: http::Method::POST,
             url: url.to_string(),
             headers: http::HeaderMap::new(),
             body: Bytes::new(),
             cc_version: None,
+            cch_offset: None,
         }
     }
 
@@ -1098,21 +1177,35 @@ impl ProxyClient {
         ProxyRequestBuilder {
             pool: self.pool.clone(),
             account_id: self.account_id.clone(),
+            country: self.country.clone(),
             method: http::Method::GET,
             url: url.to_string(),
             headers: http::HeaderMap::new(),
             body: Bytes::new(),
             cc_version: None,
+            cch_offset: None,
         }
     }
 }
 
 impl ProxyPool {
-    /// Create a ProxyClient bound to account_id.
+    /// Create a ProxyClient bound to account_id with no country override.
+    /// Uses global GeoPolicy fallback — prefer `client_with_country` for per-account routing.
     pub fn client(self: &Arc<Self>, account_id: &str) -> ProxyClient {
         ProxyClient {
             pool: self.clone(),
             account_id: account_id.to_string(),
+            country: None,
+        }
+    }
+
+    /// Create a ProxyClient bound to account_id + target country.
+    /// Used by handler so first-request allocation uses the right country.
+    pub fn client_with_country(self: &Arc<Self>, account_id: &str, country: &str) -> ProxyClient {
+        ProxyClient {
+            pool: self.clone(),
+            account_id: account_id.to_string(),
+            country: Some(country.to_lowercase()),
         }
     }
 }
@@ -1122,11 +1215,13 @@ impl ProxyPool {
 pub struct ProxyRequestBuilder {
     pool: Arc<ProxyPool>,
     account_id: String,
+    country: Option<String>,
     method: http::Method,
     url: String,
     headers: http::HeaderMap,
     body: Bytes,
     cc_version: Option<semver::Version>,
+    cch_offset: Option<usize>,
 }
 
 impl ProxyRequestBuilder {
@@ -1140,13 +1235,14 @@ impl ProxyRequestBuilder {
         self
     }
 
-    pub fn cc_cli_version(mut self, version: &semver::Version) -> Self {
+    pub fn cc_cli_version(mut self, version: &semver::Version, offset: Option<usize>) -> Self {
         self.cc_version = Some(version.clone());
+        self.cch_offset = offset;
         self
     }
 
     pub async fn send(mut self) -> Result<ProxyResponse, ProxyError> {
-        let acq = self.pool.acquire(&self.account_id).await?;
+        let acq = self.pool.acquire(&self.account_id, self.country.as_deref()).await?;
         let AcquireResult { mut conn, session_id: _, is_pooled } = acq;
 
         let uri: hyper::Uri = self.url.parse()
@@ -1174,6 +1270,7 @@ impl ProxyRequestBuilder {
             self.headers,
             self.body,
             self.cc_version.as_ref(),
+            self.cch_offset,
         ).await;
 
         match result {
@@ -1336,6 +1433,21 @@ mod tests {
     use crate::proxy::allocator::ProxyAllocator;
     use crate::proxy::config::ProxyProviderConfig;
 
+    #[test]
+    fn test_country_matches_iso_and_full_names() {
+        assert!(country_matches("us", "US"));
+        assert!(country_matches("us", "United States"));
+        assert!(country_matches("us", "united states of america"));
+        assert!(country_matches("ph", "Philippines"));
+        assert!(country_matches("ph", "Republic of the Philippines"));
+        // Both uk and gb must accept "United Kingdom" — HeroSMS uses uk, ip-api uses GB.
+        assert!(country_matches("gb", "United Kingdom"));
+        assert!(country_matches("uk", "United Kingdom"));
+        // Mismatch
+        assert!(!country_matches("us", "Canada"));
+        assert!(!country_matches("ph", "Thailand"));
+    }
+
     struct TestDir {
         path: PathBuf,
     }
@@ -1437,6 +1549,7 @@ mod tests {
             avg_connect_ms: 0.0,
             failure_streak: 0,
             last_active_at: Instant::now(),
+                country: "us".to_string(),
         };
         assert_eq!(account.active.idle_conns.len(), 0);
         assert_eq!(account.active.checked_out, 0);
@@ -1444,6 +1557,153 @@ mod tests {
     }
 
     // ── disable_in_pool / enable_in_pool ──────────────────
+
+    #[tokio::test]
+    async fn test_update_account_country_idempotent() {
+        // Calling update_account_country with the same country as state.country
+        // must be a no-op (no standby clear, no renew).
+        let dir = TestDir::new();
+        let pool = make_test_pool(&dir.path);
+
+        let session = make_test_proxy_section("sess1");
+        let standby_session = make_test_proxy_section("sess2");
+        pool.accounts.insert("a1".to_string(), Arc::new(TokioMutex::new(
+            AccountProxy {
+                active: ActiveSession {
+                    session, proxy_url: "http://test".to_string(),
+                    idle_conns: vec![], checked_out: 0,
+                },
+                standby: vec![StandbySession {
+                    session: standby_session,
+                    proxy_url: "http://standby".to_string(),
+                    warm_conn: None,
+                    avg_connect_ms: 100.0,
+                }],
+                disabled: false,
+                stats: VecDeque::new(), avg_connect_ms: 0.0,
+                failure_streak: 0, last_active_at: Instant::now(),
+                country: "jp".to_string(),
+            }
+        )));
+
+        pool.update_account_country("a1", "jp").await;
+
+        let arc = pool.accounts.get("a1").unwrap().clone();
+        let state = arc.lock().await;
+        assert_eq!(state.country, "jp");
+        assert_eq!(state.standby.len(), 1, "standby must NOT be cleared on idempotent update");
+    }
+
+    #[tokio::test]
+    async fn test_update_account_country_clears_standby_on_change() {
+        // When new country differs, standby must be cleared (old-country sessions
+        // become useless). Active session swap depends on real allocator — we only
+        // verify the observable state after the call on country + standby.
+        let dir = TestDir::new();
+        let pool = make_test_pool(&dir.path);
+
+        let session = make_test_proxy_section("sess1");
+        let standby_session = make_test_proxy_section("sess2");
+        pool.accounts.insert("a1".to_string(), Arc::new(TokioMutex::new(
+            AccountProxy {
+                active: ActiveSession {
+                    session, proxy_url: "http://test".to_string(),
+                    idle_conns: vec![], checked_out: 0,
+                },
+                standby: vec![StandbySession {
+                    session: standby_session,
+                    proxy_url: "http://standby".to_string(),
+                    warm_conn: None,
+                    avg_connect_ms: 100.0,
+                }],
+                disabled: false,
+                stats: VecDeque::new(), avg_connect_ms: 0.0,
+                failure_streak: 0, last_active_at: Instant::now(),
+                country: "us".to_string(),
+            }
+        )));
+
+        pool.update_account_country("a1", "PH").await;
+
+        let arc = pool.accounts.get("a1").unwrap().clone();
+        let state = arc.lock().await;
+        assert_eq!(state.country, "ph", "country must be lowercased");
+        assert!(state.standby.is_empty(), "standby must be cleared on country change");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_proxy_fast_path_detects_country_mismatch() {
+        // Simulates: account already in pool with country=us, caller passes
+        // Some("ph"). ensure_proxy must trigger update_account_country (at least
+        // clear standby and update state.country), NOT silently return.
+        let dir = TestDir::new();
+        let pool = make_test_pool(&dir.path);
+
+        let session = make_test_proxy_section("sess1");
+        let standby_session = make_test_proxy_section("sess2");
+        pool.accounts.insert("a1".to_string(), Arc::new(TokioMutex::new(
+            AccountProxy {
+                active: ActiveSession {
+                    session, proxy_url: "http://test".to_string(),
+                    idle_conns: vec![], checked_out: 0,
+                },
+                standby: vec![StandbySession {
+                    session: standby_session,
+                    proxy_url: "http://standby".to_string(),
+                    warm_conn: None,
+                    avg_connect_ms: 100.0,
+                }],
+                disabled: false,
+                stats: VecDeque::new(), avg_connect_ms: 0.0,
+                failure_streak: 0, last_active_at: Instant::now(),
+                country: "us".to_string(),
+            }
+        )));
+
+        // allocator may fail (test env has no real proxy), but ensure_proxy should not error
+        // on already-in-pool fast path; we assert the side effects on state.country + standby.
+        let _ = pool.ensure_proxy("a1", Some("ph")).await;
+
+        let arc = pool.accounts.get("a1").unwrap().clone();
+        let state = arc.lock().await;
+        assert_eq!(state.country, "ph", "fast path must update state.country to match override");
+        assert!(state.standby.is_empty(), "standby must be cleared");
+    }
+
+    #[tokio::test]
+    async fn test_ensure_proxy_fast_path_no_override_matches_global() {
+        // country_override=None → fast path should not trigger update_account_country.
+        let dir = TestDir::new();
+        let pool = make_test_pool(&dir.path);
+
+        let session = make_test_proxy_section("sess1");
+        let standby_session = make_test_proxy_section("sess2");
+        pool.accounts.insert("a1".to_string(), Arc::new(TokioMutex::new(
+            AccountProxy {
+                active: ActiveSession {
+                    session, proxy_url: "http://test".to_string(),
+                    idle_conns: vec![], checked_out: 0,
+                },
+                standby: vec![StandbySession {
+                    session: standby_session,
+                    proxy_url: "http://standby".to_string(),
+                    warm_conn: None,
+                    avg_connect_ms: 100.0,
+                }],
+                disabled: false,
+                stats: VecDeque::new(), avg_connect_ms: 0.0,
+                failure_streak: 0, last_active_at: Instant::now(),
+                country: "jp".to_string(),
+            }
+        )));
+
+        pool.ensure_proxy("a1", None).await.unwrap();
+
+        let arc = pool.accounts.get("a1").unwrap().clone();
+        let state = arc.lock().await;
+        assert_eq!(state.country, "jp", "None override must not modify country");
+        assert_eq!(state.standby.len(), 1, "None override must not clear standby");
+    }
 
     #[tokio::test]
     async fn test_disable_in_pool() {
@@ -1460,6 +1720,7 @@ mod tests {
                 standby: vec![], disabled: false,
                 stats: VecDeque::new(), avg_connect_ms: 0.0,
                 failure_streak: 0, last_active_at: Instant::now(),
+                country: "us".to_string(),
             }
         )));
 
@@ -1489,6 +1750,7 @@ mod tests {
                 standby: vec![], disabled: false,
                 stats: VecDeque::new(), avg_connect_ms: 0.0,
                 failure_streak: 0, last_active_at: Instant::now(),
+                country: "us".to_string(),
             }
         )));
 
@@ -1517,6 +1779,7 @@ mod tests {
                 standby: vec![], disabled: false,
                 stats: VecDeque::new(), avg_connect_ms: 0.0,
                 failure_streak: 0, last_active_at: Instant::now(),
+                country: "us".to_string(),
             }
         )));
 
@@ -1548,6 +1811,7 @@ mod tests {
                 standby: vec![], disabled: false,
                 stats: VecDeque::new(), avg_connect_ms: 0.0,
                 failure_streak: 0, last_active_at: Instant::now(),
+                country: "us".to_string(),
             }
         )));
 
@@ -1605,6 +1869,7 @@ mod tests {
                 standby: vec![], disabled: false,
                 stats: VecDeque::new(), avg_connect_ms: 0.0,
                 failure_streak: 0, last_active_at: Instant::now(),
+                country: "us".to_string(),
             }
         )));
         assert_eq!(pool.accounts.len(), 1);
@@ -1632,6 +1897,7 @@ mod tests {
                 standby: vec![], disabled: false,
                 stats: VecDeque::new(), avg_connect_ms: 0.0,
                 failure_streak: 0, last_active_at: Instant::now(),
+                country: "us".to_string(),
             }
         )));
 

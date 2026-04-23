@@ -249,6 +249,8 @@
             "cli": "Cliente CLI",
             "device": "Dispositivo",
             "carrier": "Operadora",
+            "country": "País",
+            "country_updated": "País atualizado",
             "last_activity": "Última Atividade",
             "login": "Login",
             "keepalive": "Manter Ativo",
@@ -266,7 +268,8 @@
             "delete_account": "Excluir Conta",
             "oauth_reauth": "Reautorizar OAuth",
             "proxy_country": "País",
-            "proxy_region": "Região"
+            "proxy_region": "Região",
+            "route_updated": "Rota atualizada"
         },
         "toast": {
             "proxy_enabled": "Proxy habilitado para {{count}} contas",
@@ -348,7 +351,8 @@
             "last_used": "Último Uso",
             "actions": "Ações",
             "proxy": "Proxy",
-            "last_activity": "Última Atividade"
+            "last_activity": "Última Atividade",
+            "route": "Rota"
         },
         "drag_to_reorder": "Arraste para reordenar",
         "empty": {
@@ -414,7 +418,12 @@
         },
         "refresh_confirm_title": "Atualizar Cotas",
         "refresh_confirm_all": "Atualizar cota de todas as {{count}} contas com credenciais CLI?",
-        "refresh_confirm_selected": "Atualizar cota de {{count}} conta(s) selecionada(s)?"
+        "refresh_confirm_selected": "Atualizar cota de {{count}} conta(s) selecionada(s)?",
+        "route": {
+            "proxy": "Proxy",
+            "direct": "Direto",
+            "vercel": "Vercel"
+        }
     },
     "settings": {
         "save": "Salvar Configurações",
@@ -1042,6 +1051,16 @@
             "placeholder": "(Mesmo que a Chave de API)",
             "hint": "Para implantação Docker/Web. Defina uma senha de login separada para melhorar a segurança da chave de API."
         },
+        "transparent": {
+            "title": "Porta de auditoria transparente",
+            "description": "Quando ativado, todas as solicitações nesta porta são encaminhadas ao Anthropic sem alterações e apenas registradas.",
+            "port_label": "Porta",
+            "port_hint": "Apenas localhost. Reinicie o gateway para aplicar.",
+            "bound_to": "Associado a",
+            "internal_badge": "Apenas interno",
+            "status_running": "Em execução",
+            "status_stopped": "Parado"
+        },
         "cli_sync": {
             "title": "Sincronização de Config CLI",
             "desc": "Sincronize rapidamente o endpoint e a chave da API com seu Claude Code CLI local.",
@@ -1054,6 +1073,15 @@
             "synced": "Sincronizado",
             "sync_now": "Sincronizar Agora",
             "lan_snippet": "Trecho settings.json para LAN"
+        },
+        "vercel": {
+            "title": "Vercel AI Gateway",
+            "api_key": "API Key",
+            "test": "Testar",
+            "connected": "Conectado",
+            "not_configured": "Não configurado",
+            "test_failed": "Falhou",
+            "not_tested": "Não testado"
         }
     },
     "task": {
@@ -1063,6 +1091,7 @@
         "paused": "Pausado",
         "done": "Concluído",
         "failed": "Falhou",
+        "aborted": "Abortado",
         "pause": "Pausar",
         "resume": "Retomar",
         "abort": "Cancelar",

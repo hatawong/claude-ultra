@@ -9,25 +9,30 @@ use crate::proxy::pool::ProxyPool;
 /// A change to an Account that needs to be routed to consumers.
 pub enum AccountChange {
     /// Account created and ready (web login + profile written, possibly cli too).
-    /// If cli exists, triggers token validation → CliTokenUpdated on success.
+    /// If cli exists, triggers token validation → CliUpdated on success.
     Created,
-    /// CLI token validated and ready for gateway use (add or update in ClientManager).
-    CliTokenUpdated {
-        access_token: String,
-        refresh_token: String,
-        expires_at: i64,
-    },
+    /// Account deleted.
+    Deleted,
     /// System-disabled (401/403/banned/token invalid).
     Disabled { reason: String },
     /// User manually toggled enable/disable.
     UserDisabledChanged { disabled: bool },
-    /// Account deleted.
-    Deleted,
+    /// Profile fields updated (email/fullName/subscription/etc.) — notify frontend only.
+    ProfileUpdated,
+    /// Route fields updated (route_mode / route_country) — update ClientManager cache + notify frontend.
+    RouteUpdated,
+    /// Proxy section updated (from allocation/commit/webapp result) — notify frontend only.
+    ProxyUpdated,
+    /// Web credentials updated (cookies + lastActivity) — notify frontend only.
     /// Utilization updated from get_usage (full) or gateway response headers (incremental).
     /// QuotaSnapshot is used for ClientManager.update_quota.
     UtilizationUpdated {
         snapshot: crate::models::quota::QuotaSnapshot,
     },
+    WebUpdated,
+    /// CLI section updated (new OAuth or token refresh) — sync ClientManager + notify.
+    /// Handler reads fresh cli from disk (no payload).
+    CliUpdated,
 }
 
 /// Runtime consumers that need to be notified of account changes.

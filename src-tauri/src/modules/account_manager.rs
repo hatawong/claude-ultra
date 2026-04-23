@@ -8,6 +8,21 @@ use std::sync::Arc;
 use crate::models::account::Account;
 use crate::modules::account_change::{AccountChange, AccountConsumers};
 
+/// Partial profile update for `AccountManager::set_profile`.
+/// Each field with Some gets written; None means leave unchanged.
+/// Note: `country` is immutable (set at account creation); omit it from updates.
+/// Route (route_mode / route_country) is managed separately via `set_route`.
+#[derive(Debug, Default, Clone)]
+pub struct ProfileUpdate {
+    pub email: Option<String>,
+    pub account_uuid: Option<String>,
+    pub org_id: Option<String>,
+    pub full_name: Option<String>,
+    pub subscription_type: Option<String>,
+    pub rate_limit_tier: Option<String>,
+    pub billing_type: Option<String>,
+}
+
 /// Manages concurrent read/write access to Account JSON files.
 /// Uses per-account RwLock to prevent concurrent write corruption.
 pub struct AccountManager {
@@ -30,23 +45,8 @@ impl AccountManager {
         let _ = self.consumers.set(consumers);
     }
 
-    /// Write to disk + route change to consumers.
-    pub async fn apply_change<F>(
-        &self,
-        account_id: &str,
-        f: F,
-        change: AccountChange,
-    ) -> Result<(), String>
-    where
-        F: FnOnce(&mut Account),
-    {
-        self.update(account_id, f).await?;
-        self.route_change(account_id, change).await;
-        Ok(())
-    }
-
     /// Route a change to consumers. Called after persistence is done.
-    /// Uses Box::pin for recursion: Created may chain into CliTokenUpdated.
+    /// Uses Box::pin for recursion: Created may chain into CliUpdated.
     pub(crate) fn route_change<'a>(
         &'a self,
         account_id: &'a str,
@@ -63,45 +63,32 @@ impl AccountManager {
                     // Notify frontend immediately — account appears in list right away
                     consumers.emit_frontend("account://changed", account_id);
 
-                    // If account has cli with non-expired token, force-refresh to verify it's usable
+                    // If account has cli with non-expired token, force-refresh to verify it's usable.
+                    // Note: force_refresh_token internally calls set_cli which emits CliUpdated
+                    // (handles ClientManager sync + frontend refresh); no outer route_change needed.
                     let cli_expires_at = self.read(account_id).await
                         .ok()
                         .and_then(|a| a.cli.as_ref().map(|c| c.expires_at));
                     let now_ms = chrono::Utc::now().timestamp_millis();
                     let has_valid_cli = cli_expires_at.map_or(false, |ea| ea > now_ms);
                     if has_valid_cli {
-                        match consumers.token_allocator.force_refresh_token(account_id).await {
-                            Ok(_new_token) => {
-                                // Token refreshed → CliTokenUpdated handles ClientManager + emit
-                                if let Ok(account) = self.read(account_id).await {
-                                    if let Some(cli) = account.cli.as_ref() {
-                                        self.route_change(account_id, AccountChange::CliTokenUpdated {
-                                            access_token: cli.access_token.clone(),
-                                            refresh_token: cli.refresh_token.clone(),
-                                            expires_at: cli.expires_at,
-                                        }).await;
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Created: token refresh failed for {}: {}", account_id, e);
-                                consumers.emit_frontend("account://changed", account_id);
-                            }
+                        if let Err(e) = consumers.token_allocator.force_refresh_token(account_id).await {
+                            tracing::warn!("Created: token refresh failed for {}: {}", account_id, e);
                         }
-                    } else {
-                        // No cli or token expired — just notify frontend
-                        consumers.emit_frontend("account://changed", account_id);
                     }
                 }
-                AccountChange::CliTokenUpdated { access_token, refresh_token, expires_at } => {
-                    if consumers.client_manager.has_client(account_id) {
-                        consumers.client_manager.update_client_token(
-                            account_id, access_token, refresh_token, expires_at,
-                        );
-                    } else {
-                        // Only add to pool if account is not disabled
-                        if let Ok(account) = self.read(account_id).await {
-                            if !account.disabled && !account.user_disabled {
+                AccountChange::CliUpdated => {
+                    // Read fresh cli from disk to sync ClientManager
+                    if let Ok(account) = self.read(account_id).await {
+                        if let Some(cli) = account.cli.as_ref() {
+                            if consumers.client_manager.has_client(account_id) {
+                                consumers.client_manager.update_client_token(
+                                    account_id,
+                                    cli.access_token.clone(),
+                                    cli.refresh_token.clone(),
+                                    cli.expires_at,
+                                );
+                            } else if !account.disabled && !account.user_disabled {
                                 consumers.client_manager.add_client(&account);
                             }
                         }
@@ -137,6 +124,26 @@ impl AccountManager {
                 }
                 AccountChange::UtilizationUpdated { snapshot } => {
                     consumers.client_manager.update_quota(account_id, snapshot);
+                    consumers.emit_frontend("account://changed", account_id);
+                }
+                AccountChange::ProfileUpdated => {
+                    consumers.emit_frontend("account://changed", account_id);
+                }
+                AccountChange::RouteUpdated => {
+                    // Sync ClientManager cache — read back from disk to match persisted state
+                    if let Ok(account) = self.read(account_id).await {
+                        consumers.client_manager.set_route_mode(account_id, &account.route_mode);
+                        consumers.client_manager.set_route_country(
+                            account_id,
+                            account.route_country.as_deref(),
+                        );
+                    }
+                    consumers.emit_frontend("account://changed", account_id);
+                }
+                AccountChange::ProxyUpdated => {
+                    consumers.emit_frontend("account://changed", account_id);
+                }
+                AccountChange::WebUpdated => {
                     consumers.emit_frontend("account://changed", account_id);
                 }
             }
@@ -178,7 +185,10 @@ impl AccountManager {
 
     /// Update an account atomically: read → apply closure → write back.
     /// The closure is synchronous — all async work must be done before calling update.
-    pub async fn update<F>(&self, account_id: &str, f: F) -> Result<(), String>
+    ///
+    /// Internal only: external modules must use named field methods (set_profile, set_web, etc.)
+    /// to preserve the single-writer invariant + route_change emission.
+    pub(crate) async fn update<F>(&self, account_id: &str, f: F) -> Result<(), String>
     where
         F: FnOnce(&mut Account),
     {
@@ -187,6 +197,275 @@ impl AccountManager {
         let mut account = self.read_from_file(account_id)?;
         f(&mut account);
         self.write_to_file(account_id, &account)
+    }
+
+    /// Update profile fields (partial — only fields with Some get written).
+    /// Emits AccountChange::ProfileUpdated (frontend list refresh).
+    pub async fn set_profile(
+        &self,
+        account_id: &str,
+        update: ProfileUpdate,
+    ) -> Result<(), String> {
+        self.update(account_id, |a| {
+            if let Some(ref e) = update.email { if !e.is_empty() { a.email = e.to_lowercase(); } }
+            if let Some(ref u) = update.account_uuid { if !u.is_empty() { a.account_uuid = u.clone(); } }
+            if let Some(ref o) = update.org_id { if !o.is_empty() { a.org_id = o.clone(); } }
+            if let Some(ref n) = update.full_name { if !n.is_empty() { a.full_name = n.clone(); } }
+            if let Some(ref s) = update.subscription_type {
+                if !s.is_empty() { a.subscription_type = s.clone(); }
+            } else if a.subscription_type == "unknown" {
+                a.subscription_type = "free".to_string();
+            }
+            if let Some(ref r) = update.rate_limit_tier { a.rate_limit_tier = Some(r.clone()); }
+            if let Some(ref b) = update.billing_type { a.billing_type = Some(b.clone()); }
+        }).await?;
+        self.route_change(account_id, AccountChange::ProfileUpdated).await;
+        Ok(())
+    }
+
+    /// Set custom label (user-provided nickname).
+    /// - `Some(label)` → write label
+    /// - `None` → clear
+    /// Emits AccountChange::ProfileUpdated (frontend refresh).
+    pub async fn set_label(
+        &self,
+        account_id: &str,
+        label: Option<String>,
+    ) -> Result<(), String> {
+        self.update(account_id, move |a| {
+            a.custom_label = label;
+        }).await?;
+        self.route_change(account_id, AccountChange::ProfileUpdated).await;
+        Ok(())
+    }
+
+    /// Update route_mode and/or route_country.
+    /// route_mode: only "proxy" / "vercel" / "direct" accepted; invalid values ignored (warn).
+    /// route_country: empty string clears (None); only known PROXY_COUNTRIES accepted.
+    /// Emits AccountChange::RouteUpdated (ClientManager cache sync + frontend refresh).
+    pub async fn set_route(
+        &self,
+        account_id: &str,
+        route_mode: Option<String>,
+        route_country: Option<String>,
+    ) -> Result<(), String> {
+        self.update(account_id, |a| {
+            if let Some(ref rm) = route_mode {
+                let lc = rm.to_lowercase();
+                if ["proxy", "vercel", "direct"].contains(&lc.as_str()) {
+                    a.route_mode = lc;
+                } else {
+                    tracing::warn!("invalid route_mode '{}', ignoring", rm);
+                }
+            }
+            if let Some(ref rc) = route_country {
+                if rc.is_empty() {
+                    a.route_country = None;
+                } else {
+                    let lower = rc.to_lowercase();
+                    if crate::gateway::route::PROXY_COUNTRIES.contains(&lower.as_str()) {
+                        a.route_country = Some(lower);
+                    } else {
+                        tracing::warn!("invalid route_country '{}', ignoring", rc);
+                    }
+                }
+            }
+        }).await?;
+        self.route_change(account_id, AccountChange::RouteUpdated).await;
+        Ok(())
+    }
+
+    /// Set Account.proxy.
+    /// - `Some(section)` → write proxy section
+    /// - `None` → clear (a.proxy = None)
+    /// Emits AccountChange::ProxyUpdated (frontend refresh).
+    pub async fn set_proxy(
+        &self,
+        account_id: &str,
+        proxy: Option<crate::models::account::ProxySection>,
+    ) -> Result<(), String> {
+        self.update(account_id, move |a| { a.proxy = proxy; }).await?;
+        self.route_change(account_id, AccountChange::ProxyUpdated).await;
+        Ok(())
+    }
+
+    /// Mark account as (system-)disabled.
+    /// - `Some(reason)` → set a.disabled=true + reason + disabled_at → emits Disabled
+    /// - `None` → clear disabled state (re-enable) — no event
+    pub async fn set_disabled(
+        &self,
+        account_id: &str,
+        reason: Option<String>,
+    ) -> Result<(), String> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        match reason {
+            Some(r) => {
+                let r_clone = r.clone();
+                self.update(account_id, move |a| {
+                    a.disabled = true;
+                    a.disabled_reason = Some(r);
+                    a.disabled_at = Some(now_ms);
+                    // CLI just triggered 401/403/banned — mark activity
+                    if let Some(ref mut cli) = a.cli {
+                        cli.last_activity = Some(now_ms);
+                    }
+                }).await?;
+                self.route_change(account_id, AccountChange::Disabled { reason: r_clone }).await;
+                Ok(())
+            }
+            None => {
+                self.update(account_id, |a| {
+                    a.disabled = false;
+                    a.disabled_reason = None;
+                    a.disabled_at = None;
+                }).await
+            }
+        }
+    }
+
+    /// Set user-disable state.
+    /// - `Some(reason)` → user disables; sets a.user_disabled=true + reason + timestamp
+    /// - `None` → user re-enables; clears reason + timestamp
+    /// Emits UserDisabledChanged.
+    pub async fn set_user_disabled(
+        &self,
+        account_id: &str,
+        reason: Option<String>,
+    ) -> Result<(), String> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let disabled = reason.is_some();
+        self.update(account_id, move |a| {
+            a.user_disabled = disabled;
+            if let Some(r) = reason {
+                a.user_disabled_reason = Some(r);
+                a.user_disabled_at = Some(now_ms);
+            } else {
+                a.user_disabled_reason = None;
+                a.user_disabled_at = None;
+            }
+        }).await?;
+        self.route_change(account_id, AccountChange::UserDisabledChanged { disabled }).await;
+        Ok(())
+    }
+
+    /// Set Account.utilization (full replace) and emit UtilizationUpdated.
+    /// Also bumps cli.last_activity (get_usage call = CLI activity).
+    pub async fn set_utilization(
+        &self,
+        account_id: &str,
+        usage: serde_json::Value,
+        snapshot: crate::models::quota::QuotaSnapshot,
+    ) -> Result<(), String> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.update(account_id, move |a| {
+            a.utilization = Some(usage);
+            if let Some(ref mut cli) = a.cli {
+                cli.last_activity = Some(now_ms);
+            }
+        }).await?;
+        self.route_change(account_id, AccountChange::UtilizationUpdated { snapshot }).await;
+        Ok(())
+    }
+
+    /// Merge incoming utilization with existing + bump cli.last_activity.
+    /// Used by gateway hot path (incremental quota updates from response headers).
+    /// Emits UtilizationUpdated.
+    pub async fn merge_utilization(
+        &self,
+        account_id: &str,
+        incoming: crate::modules::cli_client::Utilization,
+        snapshot: crate::models::quota::QuotaSnapshot,
+    ) -> Result<(), String> {
+        self.update(account_id, move |a| {
+            let existing = a.utilization.as_ref()
+                .and_then(|v| serde_json::from_value::<crate::modules::cli_client::Utilization>(v.clone()).ok());
+            let merged = crate::models::quota::merge_utilization(existing, incoming);
+            if let Ok(val) = serde_json::to_value(&merged) {
+                a.utilization = Some(val);
+            }
+            if let Some(ref mut cli) = a.cli {
+                cli.last_activity = Some(chrono::Utc::now().timestamp_millis());
+            }
+        }).await?;
+        self.route_change(account_id, AccountChange::UtilizationUpdated { snapshot }).await;
+        Ok(())
+    }
+
+    /// Set Account.web.
+    /// - `Some(cookies)` → write WebClient with given cookies + current lastActivity
+    /// - `None` → clear (a.web = None)
+    /// Emits AccountChange::WebUpdated (frontend refresh).
+    pub async fn set_web(
+        &self,
+        account_id: &str,
+        cookies: Option<Vec<crate::models::account::CookieData>>,
+    ) -> Result<(), String> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.update(account_id, move |a| {
+            a.web = cookies.map(|c| crate::models::account::WebClient {
+                cookies: c,
+                local_storage: std::collections::HashMap::new(),
+                last_activity: Some(now_ms),
+            });
+        }).await?;
+        self.route_change(account_id, AccountChange::WebUpdated).await;
+        Ok(())
+    }
+
+    /// Set Account.cli.
+    /// - `scopes = Some(..)`: full replace (preserves device_id via ensure_device_id)
+    /// - `scopes = None`: partial refresh (only tokens + expires_at; preserves scopes/device_id/lastActivity). No-op if cli is None.
+    /// Emits AccountChange::CliUpdated (ClientManager sync + frontend refresh).
+    pub async fn set_cli(
+        &self,
+        account_id: &str,
+        access_token: String,
+        refresh_token: String,
+        expires_at: i64,
+        scopes: Option<Vec<String>>,
+    ) -> Result<(), String> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        self.update(account_id, move |a| {
+            match scopes {
+                Some(s) => {
+                    let existing_device_id = a.cli.as_ref().map(|c| c.device_id.as_str()).unwrap_or("");
+                    let device_id = crate::models::account::ensure_device_id(existing_device_id);
+                    a.cli = Some(crate::models::account::CliClient {
+                        access_token,
+                        refresh_token,
+                        expires_at,
+                        scopes: s,
+                        last_activity: Some(now_ms),
+                        device_id,
+                    });
+                }
+                None => {
+                    if let Some(ref mut cli) = a.cli {
+                        cli.access_token = access_token;
+                        cli.refresh_token = refresh_token;
+                        cli.expires_at = expires_at;
+                        cli.last_activity = Some(now_ms);
+                    }
+                }
+            }
+        }).await?;
+        self.route_change(account_id, AccountChange::CliUpdated).await;
+        Ok(())
     }
 
     /// List all accounts in the directory.

@@ -128,9 +128,13 @@ impl ProxyAllocator {
 
     /// Get the active session's proxy_url for an account (business-layer interface).
     /// Routes through ProxyPool internally, falls back to ephemeral if no pool.
+    /// Resolves per-account country from AccountManager so first-call allocation picks up
+    /// the account's target country (not the global GeoPolicy default).
     pub async fn get_active_proxy_url(self: &Arc<Self>, account_id: &str) -> Result<String, String> {
         if let Some(pool) = self.pool.get() {
-            pool.get_active_proxy_url(account_id).await
+            let country = self.account_manager.read(account_id).await.ok()
+                .map(|a| a.resolve_proxy_country());
+            pool.get_active_proxy_url(account_id, country.as_deref()).await
                 .map_err(|e| format!("{}", e))
         } else {
             Ok(self.get_ephemeral_proxy_url())
@@ -481,12 +485,7 @@ impl ProxyAllocator {
     /// Persist a ProxySection to Account JSON.
     /// Used by ProxyPool after switch_to_standby confirms the new session.
     pub async fn commit_session(&self, account_id: &str, session: &ProxySection) -> Result<(), String> {
-        let session = session.clone();
-        self.account_manager
-            .update(account_id, move |a| {
-                a.proxy = Some(session);
-            })
-            .await
+        self.account_manager.set_proxy(account_id, Some(session.clone())).await
     }
 
     /// Allocate a new proxy session for an account.
@@ -521,11 +520,8 @@ impl ProxyAllocator {
                     };
 
                     // Write to account JSON
-                    let ps = proxy_section.clone();
                     self.account_manager
-                        .update(account_id, move |a| {
-                            a.proxy = Some(ps);
-                        })
+                        .set_proxy(account_id, Some(proxy_section.clone()))
                         .await?;
 
                     tracing::info!(

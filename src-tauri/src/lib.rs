@@ -31,6 +31,8 @@ use subprocess::SubprocessManager;
 /// Managed state for the gateway service.
 pub struct GatewayServiceState {
     pub instance: RwLock<Option<GatewayInstance>>,
+    #[cfg(feature = "internal")]
+    pub transparent_instance: RwLock<Option<GatewayInstance>>,
     pub client_manager: Arc<ClientManager>,
     pub account_manager: Arc<AccountManager>,
     pub proxy_allocator: Arc<ProxyAllocator>,
@@ -76,6 +78,9 @@ impl GatewayServiceState {
             let home = dirs::home_dir().expect("Cannot find home directory");
             home.join(".claude-ultra").join("accounts")
         });
+
+        // NOTE: Legacy `region` → `country` migration removed in round 42
+        // (no live users; existing JSON cleaned manually with `jq 'del(.region)'`).
 
         let account_manager = Arc::new(AccountManager::new(accounts_dir));
         let provider_config = Arc::new(proxy_provider_config_from(app_config));
@@ -127,6 +132,8 @@ impl GatewayServiceState {
 
         Self {
             instance: RwLock::new(None),
+            #[cfg(feature = "internal")]
+            transparent_instance: RwLock::new(None),
             client_manager,
             account_manager,
             proxy_allocator,
@@ -393,9 +400,54 @@ pub async fn init_services_inner(handle: &tauri::AppHandle) -> Result<(), String
                 );
                 let mut instance = state.instance.write().await;
                 *instance = Some(gw_instance);
+                drop(instance);
+
+                // Optionally start the transparent audit server on a separate
+                // port (internal builds only, enabled via config). Only runs
+                // after the main port came up so the Stopped UI state never
+                // diverges from a silently-listening audit port.
+                #[cfg(feature = "internal")]
+                {
+                    if config.transparent_enabled {
+                        if config.transparent_port == config.port {
+                            tracing::error!(
+                                "transparent_port ({}) conflicts with main port ({}), not starting",
+                                config.transparent_port,
+                                config.port
+                            );
+                        } else {
+                            match gateway::server::start_transparent_server(
+                                config.transparent_port,
+                                config.request_timeout,
+                                state.enable_logging.clone(),
+                                state.gateway_db.clone(),
+                            )
+                            .await
+                            {
+                                Ok(inst) => {
+                                    tracing::info!(
+                                        "Transparent audit server started on 127.0.0.1:{}",
+                                        inst.port
+                                    );
+                                    let mut ti = state.transparent_instance.write().await;
+                                    *ti = Some(inst);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to start transparent server: {}", e);
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 tracing::error!("Failed to start gateway: {}", e);
+                #[cfg(feature = "internal")]
+                if config.transparent_enabled {
+                    tracing::warn!(
+                        "Main gateway failed to start, skipping transparent audit server"
+                    );
+                }
             }
         }
     }
@@ -414,6 +466,16 @@ pub async fn shutdown_services_inner(handle: &tauri::AppHandle) -> Result<(), St
         if let Some(gw) = instance.take() {
             gw.stop().await;
             tracing::info!("Gateway stopped");
+        }
+    }
+
+    // Stop Transparent audit server (internal builds only)
+    #[cfg(feature = "internal")]
+    {
+        let mut ti = state.transparent_instance.write().await;
+        if let Some(gw) = ti.take() {
+            gw.stop().await;
+            tracing::info!("Transparent audit server stopped");
         }
     }
 
@@ -576,6 +638,7 @@ pub fn run() {
             commands::gateway::get_gateway_connection_info,
             commands::gateway::update_gateway_config,
             commands::gateway::regenerate_api_key,
+            commands::gateway::test_vercel_connection,
             // Subprocess
             commands::subprocess_cmd::start_oauth,
             commands::subprocess_cmd::start_web_login,
@@ -585,15 +648,12 @@ pub fn run() {
             commands::subprocess_cmd::is_subprocess_running,
             commands::subprocess_cmd::get_subprocess_log,
             commands::subprocess_cmd::clear_subprocess_log,
-            commands::subprocess_cmd::list_subprocesses,
+            commands::subprocess_cmd::get_task,
+            commands::subprocess_cmd::list_tasks,
             commands::subprocess_cmd::check_webapp_ready,
             // Accounts
-            commands::accounts::update_web_login,
-            commands::accounts::update_account_profile,
-            commands::accounts::mark_account_disabled,
-            commands::accounts::notify_account_created,
+            commands::accounts::update_account_route,
             commands::accounts::add_account_and_login,
-            commands::accounts::finalize_account_import,
             // Gateway DB (request logs + token stats)
             modules::gateway_db::get_request_logs,
             modules::gateway_db::get_token_stats,

@@ -136,19 +136,7 @@ impl AccountMonitor {
                         if did_refresh {
                             refreshed += 1;
                             tracing::info!("AccountMonitor: refreshed token for {}", account.account_id);
-                            // Notify ClientManager via route_change
-                            if let Ok(fresh) = self.account_manager.read(&account.account_id).await {
-                                if let Some(ref cli_cred) = fresh.cli {
-                                    self.account_manager.route_change(
-                                        &account.account_id,
-                                        crate::modules::account_change::AccountChange::CliTokenUpdated {
-                                            access_token: cli_cred.access_token.clone(),
-                                            refresh_token: cli_cred.refresh_token.clone(),
-                                            expires_at: cli_cred.expires_at,
-                                        },
-                                    ).await;
-                                }
-                            }
+                            // set_cli in token_allocator already emitted CliUpdated
                         }
                     }
                     Err(e) => {
@@ -213,7 +201,15 @@ impl AccountMonitor {
         let usage = match client.get_usage().await {
             Ok(u) => u,
             Err(e) => {
-                // Only renew proxy on connection-level failures, not on business errors (401/parse)
+                if let crate::modules::cli_client::CliClientError::HttpStatus(status, ref msg) = e {
+                    if matches!(status, 401 | 403) {
+                        let reason = format!("HTTP {}: {}", status, msg);
+                        tracing::warn!("get_usage: disabling account {} — HTTP {}", account_id, status);
+                        let _ = self.account_manager.set_disabled(account_id, Some(reason)).await;
+                        return Err(format!("get_usage: account disabled (HTTP {})", status));
+                    }
+                }
+                // Only renew proxy on connection-level failures, not on business errors (parse etc.)
                 if matches!(&e, crate::modules::cli_client::CliClientError::Http(_)) {
                     tracing::warn!("get_usage proxy error for {}, renewing: {}", account_id, e);
                     self.proxy_allocator.renew_active_proxy(account_id).await;
@@ -225,11 +221,8 @@ impl AccountMonitor {
             .map_err(|e| format!("serialize: {}", e))?;
         let snapshot = crate::models::quota::utilization_to_snapshot(&usage);
 
-        self.account_manager.apply_change(account_id, |a| {
-            a.utilization = Some(usage_value.clone());
-        }, crate::modules::account_change::AccountChange::UtilizationUpdated {
-            snapshot,
-        }).await.map_err(|e| format!("apply_change: {}", e))?;
+        self.account_manager.set_utilization(account_id, usage_value, snapshot)
+            .await.map_err(|e| format!("set_utilization: {}", e))?;
 
         Ok(())
     }

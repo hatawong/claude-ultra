@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tauri::Emitter;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::RwLock;
 
-use crate::models::account::CliClient;
 use crate::modules::account_manager::AccountManager;
 
 // ─── Message types ──────────────────────────────────────
@@ -28,13 +28,6 @@ pub enum StdoutMessage {
         total: u32,
         name: String,
         status: String,
-    },
-    Log {
-        level: String,
-        msg: String,
-    },
-    Progress {
-        percent: u32,
     },
     Result {
         success: bool,
@@ -50,7 +43,7 @@ pub enum StdoutMessage {
         #[serde(rename = "sessionKey")]
         session_key: Option<String>,
     },
-    Meta {
+    Profile {
         data: serde_json::Value,
     },
 }
@@ -62,40 +55,99 @@ pub enum SubprocessType {
     Webapp,
 }
 
-/// Info about a running subprocess (returned by list_running).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// ─── Task lifecycle ─────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskStatus {
+    Running,
+    Paused,
+    Done,
+    Failed,
+    Aborted,
+}
+
+/// Process handle — stdin/pid/generation; Some while process alive, None after exit.
+/// Not serialized (ChildStdin is not Serialize).
+#[derive(Debug)]
+pub struct ProcessHandle {
+    pub stdin: Option<tokio::process::ChildStdin>,
+    pub pid: u32,
+    pub generation: u64,
+}
+
+/// Single source of truth for a subprocess task lifecycle.
+/// Persists after process exit (retains final status/result for UI restore).
+/// Note: percent is not stored — derived from step/total_steps + status at render time.
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SubprocessInfo {
+pub struct SubprocessTask {
+    // Identity
     pub task_id: String,
     pub account_id: String,
     pub subprocess_type: SubprocessType,
     pub flow: String,
+    // Lifecycle
+    pub status: TaskStatus,
+    pub step: u32,
+    pub total_steps: u32,
+    pub step_name: String,
+    pub error: Option<String>,
+    pub result: Option<serde_json::Value>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub last_event_at: i64,
+    // Process handle — skipped from IPC
+    #[serde(skip)]
+    pub process: Option<ProcessHandle>,
 }
 
-// ─── SubprocessHandle ───────────────────────────────────
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
 
-struct SubprocessHandle {
-    task_id: String,
-    account_id: String,
-    subprocess_type: SubprocessType,
-    flow: String,
-    stdin: Option<tokio::process::ChildStdin>,
-    pid: u32,
-    generation: u64,
+/// Emit `subprocess://task` with the current task snapshot.
+async fn emit_task_snapshot(app: &tauri::AppHandle, task_arc: &Arc<RwLock<SubprocessTask>>) {
+    let snapshot = {
+        let t = task_arc.read().await;
+        serde_json::to_value(&*t).unwrap_or_default()
+    };
+    let _ = app.emit("subprocess://task", &snapshot);
 }
 
 // ─── SubprocessManager ──────────────────────────────────
 
 pub struct SubprocessManager {
-    processes: Arc<DashMap<String, SubprocessHandle>>,
+    tasks: Arc<DashMap<String, Arc<RwLock<SubprocessTask>>>>,
     generation: AtomicU64,
+    app_handle: std::sync::OnceLock<tauri::AppHandle>,
 }
 
 impl SubprocessManager {
     pub fn new() -> Self {
         Self {
-            processes: Arc::new(DashMap::new()),
+            tasks: Arc::new(DashMap::new()),
             generation: AtomicU64::new(0),
+            app_handle: std::sync::OnceLock::new(),
+        }
+    }
+
+    pub fn get_task(&self, task_id: &str) -> Option<Arc<RwLock<SubprocessTask>>> {
+        self.tasks.get(task_id).map(|e| e.value().clone())
+    }
+
+    pub fn tasks(&self) -> Arc<DashMap<String, Arc<RwLock<SubprocessTask>>>> {
+        self.tasks.clone()
+    }
+
+    async fn emit_task_updated(&self, task_id: &str) {
+        if let (Some(app), Some(entry)) = (self.app_handle.get(), self.tasks.get(task_id)) {
+            let task_arc = entry.value().clone();
+            drop(entry);
+            emit_task_snapshot(app, &task_arc).await;
         }
     }
 
@@ -114,6 +166,9 @@ impl SubprocessManager {
         app_handle: tauri::AppHandle,
         account_manager: Arc<AccountManager>,
     ) -> Result<(), String> {
+        // Register AppHandle on first spawn for emit_task_updated to work.
+        let _ = self.app_handle.set(app_handle.clone());
+
         let mut child = tokio::process::Command::new(command)
             .args(&args)
             .stdout(Stdio::piped())
@@ -129,31 +184,41 @@ impl SubprocessManager {
         let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
         let stdin = child.stdin.take();
 
-        // Store handle with generation + PID for cleanup on app exit
+        // Create or replace Task in map. If an old Task exists (from previous run),
+        // its process was already aborted by abort_if_running; overwrite wholesale.
         let gen = self.generation.fetch_add(1, Ordering::SeqCst);
-        self.processes.insert(
-            task_id.clone(),
-            SubprocessHandle {
-                task_id: task_id.clone(),
-                account_id: account_id.clone(),
-                subprocess_type,
-                flow: flow.clone(),
-                stdin,
-                pid,
-                generation: gen,
-            },
-        );
+        let started = now_ms();
+        let task = Arc::new(RwLock::new(SubprocessTask {
+            task_id: task_id.clone(),
+            account_id: account_id.clone(),
+            subprocess_type,
+            flow: flow.clone(),
+            status: TaskStatus::Running,
+            step: 0,
+            total_steps: 0,
+            step_name: String::new(),
+            error: None,
+            result: None,
+            started_at: started,
+            finished_at: None,
+            last_event_at: started,
+            process: Some(ProcessHandle { stdin, pid, generation: gen }),
+        }));
+        self.tasks.insert(task_id.clone(), task.clone());
+
+        // Emit initial snapshot so frontend can restore dialog immediately.
+        emit_task_snapshot(&app_handle, &task).await;
 
         let task_id_stdout = task_id.clone();
         let account_id_stdout = account_id.clone();
         let flow_stdout = flow.clone();
         let app = app_handle.clone();
         let acct_mgr = account_manager.clone();
-        let processes = self.processes.clone();
+        let tasks = self.tasks.clone();
+        let task_arc_stdout = task.clone();
 
         // Background task: read stderr — write to log file + emit to frontend + collect for error
         let task_id_stderr = task_id.clone();
-        let app_stderr = app_handle.clone();
         let stderr_lines = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let stderr_lines_clone = stderr_lines.clone();
         // Log file: ~/.claude-ultra/logs/{task_id}.log
@@ -189,12 +254,6 @@ impl SubprocessManager {
                         buf.remove(0);
                     }
                 }
-                // Emit to frontend as log event
-                let payload = serde_json::json!({
-                    "taskId": task_id_stderr,
-                    "data": { "type": "log", "level": "info", "msg": line },
-                });
-                let _ = app_stderr.emit("subprocess://log", &payload);
             }
         });
 
@@ -203,36 +262,146 @@ impl SubprocessManager {
         tokio::spawn(async move {
             let reader = BufReader::new(stdout);
             let mut lines = reader.lines();
-            let mut got_result = false;
 
             while let Ok(Some(line)) = lines.next_line().await {
                 // Try parse as JSON
                 match serde_json::from_str::<StdoutMessage>(&line) {
                     Ok(msg) => {
-                        let event_type = match &msg {
-                            StdoutMessage::Step { .. } => "step",
-                            StdoutMessage::Log { .. } => "log",
-                            StdoutMessage::Progress { .. } => "progress",
-                            StdoutMessage::Result { .. } => "result",
-                            StdoutMessage::Error { .. } => "error",
-                            StdoutMessage::Cookies { .. } => "cookies",
-                            StdoutMessage::Meta { .. } => "meta",
+                        // Update Task state (single source of truth). subprocess://task emitted after.
+                        let task_changed = {
+                            let mut t = task_arc_stdout.write().await;
+                            t.last_event_at = now_ms();
+                            match &msg {
+                                StdoutMessage::Step { step, total, name, .. } => {
+                                    t.step = *step;
+                                    t.total_steps = *total;
+                                    t.step_name = name.clone();
+                                    true
+                                }
+                                StdoutMessage::Result { success: true, data } => {
+                                    // Store result but keep status=Running; wait() exit will set Done
+                                    // after browser close (webapp has post-complete 30s wait).
+                                    t.result = Some(data.clone());
+                                    true
+                                }
+                                StdoutMessage::Result { success: false, data } => {
+                                    t.status = TaskStatus::Failed;
+                                    t.error = data.get("error")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                        .or_else(|| Some("Task failed".to_string()));
+                                    t.finished_at = Some(now_ms());
+                                    true
+                                }
+                                StdoutMessage::Error { code, msg: emsg, .. } => {
+                                    t.error = Some(format!("{}: {}", code, emsg));
+                                    true
+                                }
+                                _ => false,
+                            }
                         };
+                        if task_changed {
+                            emit_task_snapshot(&app, &task_arc_stdout).await;
+                        }
 
-                        let payload = serde_json::json!({
-                            "taskId": task_id_stdout,
-                            "accountId": account_id_stdout,
-                            "data": serde_json::to_value(&msg).unwrap_or_default(),
-                        });
+                        // Direct write: cookies event → update Account.web (replaces frontend round-trip).
+                        if let StdoutMessage::Cookies { ref cookies, ref session_key } = msg {
+                            if let Some(sk) = session_key.as_deref() {
+                                if !sk.is_empty() {
+                                    // Parse failure must not clobber valid web state with an empty vec.
+                                    match serde_json::from_value::<Vec<crate::models::account::CookieData>>(cookies.clone()) {
+                                        Ok(cookie_vec) => {
+                                            if let Err(e) = acct_mgr.set_web(&account_id_stdout, Some(cookie_vec)).await {
+                                                tracing::error!(
+                                                    "[subprocess:{}] write cookies failed: {}",
+                                                    task_id_stdout, e
+                                                );
+                                            }
+                                        }
+                                        Err(e) => {
+                                            tracing::error!(
+                                                "[subprocess:{}] cookies parse failed, preserving existing web: {}",
+                                                task_id_stdout, e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
-                        let event_name = format!("subprocess://{}", event_type);
-                        let _ = app.emit(&event_name, &payload);
+                        // Direct write: profile event → update Account profile fields.
+                        if let StdoutMessage::Profile { ref data } = msg {
+                            let update = crate::modules::account_manager::ProfileUpdate {
+                                email: data.get("email").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                account_uuid: data.get("accountUuid").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                org_id: data.get("orgId").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                full_name: data.get("fullName").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                subscription_type: data.get("subscriptionType").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                rate_limit_tier: data.get("rateLimitTier").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                billing_type: data.get("billingType").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                            };
+                            if let Err(e) = acct_mgr.set_profile(&account_id_stdout, update).await {
+                                tracing::error!(
+                                    "[subprocess:{}] write profile failed: {}",
+                                    task_id_stdout, e
+                                );
+                            }
+                        }
 
                         // Handle result by flow type
                         if let StdoutMessage::Result { success: true, ref data } = msg {
-                            got_result = true;
+
+                            // Common writes for web-add / web-login / web-oauth:
+                            // final cookies, proxy, profile (overwrite mid-flow partial writes).
+                            if matches!(flow_stdout.as_str(), "web-add" | "web-login" | "web-oauth") {
+                                // Final web credentials
+                                let sk = data.get("sessionKey").and_then(|v| v.as_str()).unwrap_or("");
+                                if !sk.is_empty() {
+                                    if let Some(cookies_val) = data.get("cookies") {
+                                        // Parse failure must not clobber valid web state.
+                                        match serde_json::from_value::<Vec<crate::models::account::CookieData>>(cookies_val.clone()) {
+                                            Ok(cookie_vec) => {
+                                                if let Err(e) = acct_mgr.set_web(&account_id_stdout, Some(cookie_vec)).await {
+                                                    tracing::error!("[subprocess:{}] result set_web failed: {}", task_id_stdout, e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::error!(
+                                                    "[subprocess:{}] result cookies parse failed, preserving existing web: {}",
+                                                    task_id_stdout, e
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                // Proxy
+                                if let Some(proxy_val) = data.get("proxy") {
+                                    if !proxy_val.is_null() {
+                                        if let Ok(ps) = serde_json::from_value::<crate::models::account::ProxySection>(proxy_val.clone()) {
+                                            if let Err(e) = acct_mgr.set_proxy(&account_id_stdout, Some(ps)).await {
+                                                tracing::error!("[subprocess:{}] result set_proxy failed: {}", task_id_stdout, e);
+                                            }
+                                        }
+                                    }
+                                }
+                                // Profile
+                                let update = crate::modules::account_manager::ProfileUpdate {
+                                    email: data.get("email").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    account_uuid: data.get("accountUuid").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    org_id: data.get("orgId").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    full_name: data.get("fullName").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    subscription_type: data.get("subscriptionType").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    rate_limit_tier: data.get("rateLimitTier").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                    billing_type: data.get("billingType").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                                };
+                                if let Err(e) = acct_mgr.set_profile(&account_id_stdout, update).await {
+                                    tracing::error!("[subprocess:{}] result set_profile failed: {}", task_id_stdout, e);
+                                }
+                            }
+
                             match flow_stdout.as_str() {
-                                "oauth" => {
+                                "web-oauth" => {
+                                    // OAuth-specific: write CLI tokens (set_cli emits CliUpdated)
                                     if let Err(e) = handle_oauth_result(
                                         &acct_mgr, &account_id_stdout, data,
                                     ).await {
@@ -241,13 +410,14 @@ impl SubprocessManager {
                                             task_id_stdout, e
                                         );
                                     }
-                                },
-                                // web-login / keepalive: handled by frontend via events, Rust does not intervene
+                                }
+                                "web-add" => {
+                                    // Account creation complete → trigger Created flow
+                                    use crate::modules::account_change::AccountChange;
+                                    acct_mgr.route_change(&account_id_stdout, AccountChange::Created).await;
+                                }
                                 _ => {}
                             }
-                        }
-                        if let StdoutMessage::Result { success: false, .. } = msg {
-                            got_result = true;
                         }
 
                         // Handle error
@@ -258,6 +428,18 @@ impl SubprocessManager {
                                 code,
                                 msg
                             );
+                            // Suspended/banned → auto disable account (replaces frontend mark_account_disabled call)
+                            let msg_lower = msg.to_lowercase();
+                            if msg_lower.contains("suspended") || msg_lower.contains("banned") {
+                                let date = chrono::Utc::now().format("%Y-%m-%d");
+                                let reason = format!("Web login banned ({})", date);
+                                if let Err(e) = acct_mgr.set_disabled(&account_id_stdout, Some(reason)).await {
+                                    tracing::error!(
+                                        "[subprocess:{}] auto-disable failed: {}",
+                                        task_id_stdout, e
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(_) => {
@@ -274,13 +456,36 @@ impl SubprocessManager {
                 .map(|s| s.code().unwrap_or(-1))
                 .unwrap_or(-1);
 
-            // Clean up handle immediately so is_running returns false
-            // (before emitting terminal event, prevents frontend from thinking it's still running)
-            if let Some(entry) = processes.get(&task_id_stdout) {
-                if entry.value().generation == gen {
-                    drop(entry);
-                    processes.remove(&task_id_stdout);
+            // Clear process handle so is_running() returns false.
+            // Task object stays in map with final status.
+            let task_arc_opt = tasks.get(&task_id_stdout).map(|e| e.value().clone());
+            if let Some(task_arc) = task_arc_opt {
+                {
+                    let mut t = task_arc.write().await;
+                    if let Some(ref ph) = t.process {
+                        if ph.generation != gen {
+                            // A newer generation replaced us; do nothing.
+                            return;
+                        }
+                    }
+                    t.process = None;
+                    t.last_event_at = now_ms();
+                    if t.finished_at.is_none() {
+                        t.finished_at = Some(now_ms());
+                    }
+                    // If no terminal result emitted, set Failed from exit code
+                    if matches!(t.status, TaskStatus::Running | TaskStatus::Paused) {
+                        if exit_code == 0 {
+                            t.status = TaskStatus::Done;
+                        } else {
+                            t.status = TaskStatus::Failed;
+                            if t.error.is_none() {
+                                t.error = Some(format!("Process exited with code {}", exit_code));
+                            }
+                        }
+                    }
                 }
+                emit_task_snapshot(&app, &task_arc).await;
             }
 
             // Append error marker to log file for non-zero exit
@@ -300,34 +505,10 @@ impl SubprocessManager {
                     });
             }
 
-            if !got_result {
-                if exit_code == 0 {
-                    let _ = app.emit(
-                        "subprocess://completed",
-                        serde_json::json!({
-                            "taskId": task_id_stdout,
-                            "accountId": account_id_stdout,
-                            "exitCode": exit_code,
-                        }),
-                    );
-                } else {
-                    // Collect stderr last lines for error context
-                    let stderr_tail = stderr_lines_for_error
-                        .lock()
-                        .map(|buf| buf.join("\n"))
-                        .unwrap_or_default();
-                    let _ = app.emit(
-                        "subprocess://failed",
-                        serde_json::json!({
-                            "taskId": task_id_stdout,
-                            "accountId": account_id_stdout,
-                            "exitCode": exit_code,
-                            "error": format!("Process exited with code {}", exit_code),
-                            "stderr": stderr_tail,
-                        }),
-                    );
-                }
-            }
+            // Task state already updated above (Done/Failed based on exit_code).
+            // subprocess://task snapshot emitted after that update covers lifecycle end.
+            // stderr_lines_for_error retained for future use (error reporting via Task.error).
+            let _ = &stderr_lines_for_error;
 
             tracing::info!(
                 "[subprocess:{}] exited (code={})",
@@ -343,89 +524,161 @@ impl SubprocessManager {
         Ok(())
     }
 
-    /// List currently running subprocesses.
-    pub fn list_running(&self) -> Vec<SubprocessInfo> {
-        self.processes
-            .iter()
-            .map(|entry| {
-                let h = entry.value();
-                SubprocessInfo {
-                    task_id: h.task_id.clone(),
-                    account_id: h.account_id.clone(),
-                    subprocess_type: h.subprocess_type,
-                    flow: h.flow.clone(),
-                }
-            })
-            .collect()
-    }
-
-    /// Check if a subprocess is running.
-    pub fn is_running(&self, task_id: &str) -> bool {
-        self.processes.contains_key(task_id)
+    /// Check if a subprocess is running (process handle present).
+    pub async fn is_running(&self, task_id: &str) -> bool {
+        match self.tasks.get(task_id) {
+            Some(entry) => entry.value().read().await.process.is_some(),
+            None => false,
+        }
     }
 
     /// Send a JSON message to subprocess stdin.
-    /// Takes stdin out of the map to avoid holding DashMap lock across await.
+    /// On write failure (broken pipe etc.), stdin is permanently dropped — future
+    /// send_stdin calls will return "Subprocess stdin not available".
     pub async fn send_stdin(&self, task_id: &str, message: &str) -> Result<(), String> {
+        let task_arc = self
+            .tasks
+            .get(task_id)
+            .ok_or_else(|| format!("No task with task_id: {}", task_id))?
+            .value()
+            .clone();
+
+        // Take stdin out (hold write lock briefly, drop before await)
         let mut stdin = {
-            let mut entry = self
-                .processes
-                .get_mut(task_id)
-                .ok_or_else(|| format!("No subprocess with task_id: {}", task_id))?;
-            entry.value_mut().stdin.take()
+            let mut t = task_arc.write().await;
+            let ph = t.process.as_mut()
+                .ok_or_else(|| "Subprocess not running".to_string())?;
+            ph.stdin.take()
                 .ok_or_else(|| "Subprocess stdin not available".to_string())?
-        }; // DashMap lock released here
+        };
 
         let msg = format!("{}\n", message);
-        let result = stdin
+        let write_result = stdin
             .write_all(msg.as_bytes())
             .await
-            .map(|_| ())
             .and(stdin.flush().await)
             .map_err(|e| format!("Failed to write to stdin: {}", e));
 
-        // Put stdin back
-        if let Some(mut entry) = self.processes.get_mut(task_id) {
-            entry.value_mut().stdin = Some(stdin);
+        // Put stdin back ONLY on success. On failure, drop the stdin permanently
+        // (broken pipe etc.) to prevent future callers from reusing a dead handle.
+        if write_result.is_ok() {
+            let mut t = task_arc.write().await;
+            if let Some(ph) = t.process.as_mut() {
+                ph.stdin = Some(stdin);
+            }
         }
 
-        result
+        write_result
     }
 
-    /// Send abort signal to subprocess via stdin.
+    /// Send abort signal to subprocess via stdin + mark status Aborted.
+    /// User intent takes precedence: status is marked Aborted BEFORE attempting
+    /// send_stdin, so stdin failure (broken pipe / concurrent take) doesn't
+    /// invalidate the user's abort click. wait() exit won't overwrite Aborted
+    /// (check excludes Aborted from the Running|Paused match).
     pub async fn abort(&self, task_id: &str) -> Result<(), String> {
-        self.send_stdin(task_id, r#"{"type":"abort"}"#).await
+        let changed = if let Some(entry) = self.tasks.get(task_id) {
+            let task_arc = entry.value().clone();
+            drop(entry);
+            let mut t = task_arc.write().await;
+            if matches!(t.status, TaskStatus::Running | TaskStatus::Paused) {
+                t.status = TaskStatus::Aborted;
+                t.last_event_at = now_ms();
+                t.finished_at.get_or_insert(now_ms());
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed { self.emit_task_updated(task_id).await; }
+
+        // Best-effort send abort to webapp — failure is logged but not returned.
+        if let Err(e) = self.send_stdin(task_id, r#"{"type":"abort"}"#).await {
+            tracing::warn!("[subprocess:{}] abort send_stdin failed (best-effort): {}", task_id, e);
+        }
+        Ok(())
+    }
+
+    /// Mark status as Paused (caller still needs to send pause message via send_stdin).
+    pub async fn mark_paused(&self, task_id: &str) {
+        let changed = if let Some(entry) = self.tasks.get(task_id) {
+            let task_arc = entry.value().clone();
+            drop(entry);
+            let mut t = task_arc.write().await;
+            if t.status == TaskStatus::Running {
+                t.status = TaskStatus::Paused;
+                t.last_event_at = now_ms();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed { self.emit_task_updated(task_id).await; }
+    }
+
+    /// Mark status as Running (caller still needs to send resume message via send_stdin).
+    pub async fn mark_resumed(&self, task_id: &str) {
+        let changed = if let Some(entry) = self.tasks.get(task_id) {
+            let task_arc = entry.value().clone();
+            drop(entry);
+            let mut t = task_arc.write().await;
+            if t.status == TaskStatus::Paused {
+                t.status = TaskStatus::Running;
+                t.last_event_at = now_ms();
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if changed { self.emit_task_updated(task_id).await; }
     }
 
     /// Graceful shutdown: send abort to all via stdin → wait up to 3s → SIGKILL survivors.
-    /// App exit needs fast, reliable termination so we skip SIGTERM and go straight
-    /// to SIGKILL once the graceful window elapses.
     pub async fn kill_all(&self) {
-        // 1. Send abort to all
-        let task_ids: Vec<String> = self.processes.iter().map(|e| e.key().clone()).collect();
-        for tid in &task_ids {
+        // 1. Collect running task_ids + send abort to each
+        let mut running_ids: Vec<String> = Vec::new();
+        for entry in self.tasks.iter() {
+            let t = entry.value().read().await;
+            if t.process.is_some() {
+                running_ids.push(t.task_id.clone());
+            }
+        }
+        for tid in &running_ids {
             let _ = self.send_stdin(tid, r#"{"type":"abort"}"#).await;
         }
 
-        if task_ids.is_empty() { return; }
+        if running_ids.is_empty() { return; }
 
-        // 2. Wait up to 3s for graceful exit
+        // 2. Wait up to 3s for graceful exit (process cleared when wait() completes)
         for _ in 0..6 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            if self.processes.is_empty() { return; }
+            let mut still_running = false;
+            for tid in &running_ids {
+                if self.is_running(tid).await { still_running = true; break; }
+            }
+            if !still_running { return; }
         }
 
         // 3. SIGKILL survivors
-        for entry in self.processes.iter() {
-            let pid = entry.value().pid;
-            if pid > 0 {
-                tracing::info!("[subprocess] killing {} (pid={})", entry.key(), pid);
-                let _ = std::process::Command::new("kill")
-                    .args(["-9", &pid.to_string()])
-                    .output();
+        for tid in &running_ids {
+            if let Some(entry) = self.tasks.get(tid) {
+                let t = entry.value().read().await;
+                if let Some(ref ph) = t.process {
+                    if ph.pid > 0 {
+                        tracing::info!("[subprocess] killing {} (pid={})", tid, ph.pid);
+                        let _ = std::process::Command::new("kill")
+                            .args(["-9", &ph.pid.to_string()])
+                            .output();
+                    }
+                }
             }
         }
-        self.processes.clear();
     }
 }
 
@@ -459,34 +712,10 @@ async fn handle_oauth_result(
         return Err("accessToken is empty".to_string());
     }
 
-    let at = access_token.clone();
-    let rt = refresh_token.clone();
     account_manager
-        .update(account_id, |a| {
-            let existing_device_id = a.cli.as_ref().map(|c| c.device_id.as_str()).unwrap_or("");
-            a.cli = Some(CliClient {
-                access_token: access_token.clone(),
-                refresh_token: refresh_token.clone(),
-                expires_at,
-                scopes: scopes.clone(),
-                last_activity: Some(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as i64,
-                ),
-                device_id: crate::models::account::ensure_device_id(existing_device_id),
-            });
-        })
+        .set_cli(account_id, access_token, refresh_token, expires_at, Some(scopes))
         .await?;
-
-    // Notify consumers: fresh OAuth token, add or update in ClientManager
-    use crate::modules::account_change::AccountChange;
-    account_manager.route_change(account_id, AccountChange::CliTokenUpdated {
-        access_token: at,
-        refresh_token: rt,
-        expires_at,
-    }).await;
+    // set_cli emits CliUpdated → ClientManager sync + frontend notify
 
     tracing::info!(
         "[oauth] Account {} CLI token updated (expires_at={})",
@@ -598,31 +827,6 @@ mod tests {
                 assert_eq!(status, "running");
             }
             _ => panic!("Expected Step message"),
-        }
-    }
-
-    #[test]
-    fn test_parse_log_message() {
-        let json = r#"{"type":"log","level":"info","msg":"浏览器 IP: 1.2.3.4"}"#;
-        let msg: StdoutMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            StdoutMessage::Log { level, msg } => {
-                assert_eq!(level, "info");
-                assert_eq!(msg, "浏览器 IP: 1.2.3.4");
-            }
-            _ => panic!("Expected Log message"),
-        }
-    }
-
-    #[test]
-    fn test_parse_progress_message() {
-        let json = r#"{"type":"progress","percent":42}"#;
-        let msg: StdoutMessage = serde_json::from_str(json).unwrap();
-        match msg {
-            StdoutMessage::Progress { percent } => {
-                assert_eq!(percent, 42);
-            }
-            _ => panic!("Expected Progress message"),
         }
     }
 
@@ -790,11 +994,11 @@ mod tests {
 
     // ── 4. SubprocessManager basics ────────────────────
 
-    #[test]
-    fn test_subprocess_manager_new() {
+    #[tokio::test]
+    async fn test_subprocess_manager_new() {
         let mgr = SubprocessManager::new();
-        assert_eq!(mgr.list_running().len(), 0);
-        assert!(!mgr.is_running("nonexistent"));
+        assert_eq!(mgr.tasks().len(), 0);
+        assert!(!mgr.is_running("nonexistent").await);
     }
 
     // ── 5. StdoutMessage serialization roundtrip ───────
@@ -808,11 +1012,6 @@ mod tests {
                 name: "IP门控".to_string(),
                 status: "done".to_string(),
             },
-            StdoutMessage::Log {
-                level: "info".to_string(),
-                msg: "test".to_string(),
-            },
-            StdoutMessage::Progress { percent: 50 },
             StdoutMessage::Result {
                 success: true,
                 data: serde_json::json!({"token": "test"}),

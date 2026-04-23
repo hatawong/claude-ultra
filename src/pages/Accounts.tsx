@@ -3,8 +3,8 @@ import {
   Download, Plus, RefreshCw, Search, Upload,
   Trash2, ToggleLeft, ToggleRight,
 } from 'lucide-react';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useTranslation } from 'react-i18next';
 import {
   DndContext, closestCenter, KeyboardSensor, PointerSensor,
@@ -60,81 +60,76 @@ function Accounts() {
 
   // Dialog state
   const [detailsAccount, setDetailsAccount] = useState<Account | null>(null);
+
+  // Keep open details dialog in sync with account store — onUpdated triggers
+  // fetchAccounts(), and this effect replaces detailsAccount with the fresh version
+  // so the dialog doesn't show stale country/quota state.
+  useEffect(() => {
+    if (!detailsAccount) return;
+    const fresh = accounts.find((a) => a.accountId === detailsAccount.accountId);
+    if (fresh && fresh !== detailsAccount) {
+      setDetailsAccount(fresh);
+    }
+  }, [accounts, detailsAccount]);
   const [webLoginAccount, setWebLoginAccount] = useState<Account | null>(null);
   const [webOAuthAccount, setOAuthAccount] = useState<Account | null>(null);
-  const [runningWebLogins, setRunningWebLogins] = useState<Set<string>>(new Set());
+  const [runningWebLogin, setRunningWebLogin] = useState<Set<string>>(new Set());
+  const [runningWebOAuth, setRunningWebOAuth] = useState<Set<string>>(new Set());
 
-  // Listen to web-login subprocess events
+  // Track running status for per-account UI badge via single subprocess://task event.
+  // Only web-login / web-oauth have per-account badge — web-add is singleton (no list badge).
+  // Listen first, then seed — ensures events during seed window aren't lost.
+  // Per-task lastEventAt version check guards against stale snapshot overwriting newer event.
+  // Track per-taskId status so same account with multiple tasks (web-login + web-oauth)
+  // doesn't get its badge cleared by a stale done event from another task.
   useEffect(() => {
     const unlisteners: UnlistenFn[] = [];
-    const WL = 'web-login-';
-    const doneTaskIds = new Set<string>(); // Completed tasks, ignore late events
-    const extractId = (tid: string) => tid.startsWith(WL) ? tid.slice(WL.length) : null;
-    const markRunning = (tid: string, fromStdout: boolean = false) => {
-      if (fromStdout) doneTaskIds.delete(tid); // stdout event means a new run started, clear done mark
-      if (doneTaskIds.has(tid)) return;
-      const id = extractId(tid);
-      if (id) setRunningWebLogins(prev => { const n = new Set(prev); n.add(id); return n; });
+    const PREFIXES = ['web-login-', 'web-oauth-'];
+    const matchPrefix = (tid: string | undefined): string | null => {
+      if (!tid) return null;
+      for (const p of PREFIXES) if (tid.startsWith(p)) return p;
+      return null;
     };
-    const markDone = (tid: string) => {
-      doneTaskIds.add(tid);
-      const id = extractId(tid);
-      if (id) setRunningWebLogins(prev => { const n = new Set(prev); n.delete(id); return n; });
+    const lastEventMap = new Map<string, number>();
+    // Per-kind running tracking: accountId → Set<taskId> for each kind
+    const runningByKind: Record<'web-login-' | 'web-oauth-', Map<string, Set<string>>> = {
+      'web-login-': new Map(),
+      'web-oauth-': new Map(),
+    };
+    const applyTask = (task: any) => {
+      const prefix = matchPrefix(task?.taskId) as 'web-login-' | 'web-oauth-' | null;
+      if (!prefix) return;
+      const at = typeof task.lastEventAt === 'number' ? task.lastEventAt : 0;
+      const prev = lastEventMap.get(task.taskId) ?? 0;
+      if (at < prev) return;  // stale snapshot
+      lastEventMap.set(task.taskId, at);
+      const id = task.taskId.slice(prefix.length);
+      const isRunning = task.status === 'running' || task.status === 'paused';
+      const bucket = runningByKind[prefix];
+      const existing = bucket.get(id) ?? new Set();
+      if (isRunning) existing.add(task.taskId);
+      else existing.delete(task.taskId);
+      if (existing.size > 0) bucket.set(id, existing);
+      else bucket.delete(id);
+      // Derive per-kind Set<accountId> for UI consumer
+      if (prefix === 'web-login-') setRunningWebLogin(new Set(bucket.keys()));
+      else setRunningWebOAuth(new Set(bucket.keys()));
     };
 
     let disposed = false;
-    const reg = async (promise: Promise<UnlistenFn>) => {
-      const fn = await promise;
-      if (disposed) fn();
-      else unlisteners.push(fn);
-    };
-    const setup = async () => {
-      await reg(listen<any>('subprocess://step', e => { if (e.payload.taskId?.startsWith(WL)) markRunning(e.payload.taskId, true); }));
-      await reg(listen<any>('subprocess://log', e => { if (e.payload.taskId?.startsWith(WL)) markRunning(e.payload.taskId, false); }));
-      // Fallback: save cookies/proxy/profile even when dialog is closed
-      await reg(listen<any>('subprocess://cookies', e => {
-        if (!e.payload.taskId?.startsWith(WL)) return;
-        const sk = e.payload.data?.sessionKey;
-        if (!sk) return;
-        const aid = extractId(e.payload.taskId);
-        if (aid) invoke('update_web_login', { accountId: aid, cookies: e.payload.data?.cookies || [], sessionKey: sk, proxy: null }).catch(() => {});
-      }));
-      await reg(listen<any>('subprocess://meta', e => {
-        if (!e.payload.taskId?.startsWith(WL)) return;
-        const aid = extractId(e.payload.taskId);
-        const meta = e.payload.data?.data || e.payload.data;
-        if (aid && meta) invoke('update_account_profile', { accountId: aid, email: meta.email || null, accountUuid: meta.accountUuid || null, orgId: meta.orgId || null, fullName: meta.fullName || null, subscriptionType: meta.subscriptionType || null, rateLimitTier: meta.rateLimitTier || null, billingType: meta.billingType || null }).then(() => fetchAccounts()).catch(() => {});
-      }));
-      await reg(listen<any>('subprocess://result', e => {
-        if (!e.payload.taskId?.startsWith(WL)) return;
-        markDone(e.payload.taskId);
-        if (e.payload.data?.success) {
-          const aid = extractId(e.payload.taskId);
-          if (aid) {
-            invoke('update_web_login', { accountId: aid, cookies: e.payload.data?.data?.cookies || [], sessionKey: e.payload.data?.data?.sessionKey || '', proxy: e.payload.data?.data?.proxy || null }).catch(() => {});
-            invoke('update_account_profile', { accountId: aid, email: e.payload.data?.data?.email || null, accountUuid: e.payload.data?.data?.accountUuid || null, orgId: e.payload.data?.data?.orgId || null, fullName: e.payload.data?.data?.fullName || null, subscriptionType: e.payload.data?.data?.subscriptionType || null, rateLimitTier: e.payload.data?.data?.rateLimitTier || null, billingType: e.payload.data?.data?.billingType || null }).catch(() => {});
-          }
-          fetchAccounts();
+    (async () => {
+      // Listen first so events during seed window are captured.
+      const fn = await listen<any>('subprocess://task', e => applyTask(e.payload));
+      if (disposed) { fn(); return; }
+      unlisteners.push(fn);
+      // Then seed from current tasks (survives page switch).
+      try {
+        const tasks = await invoke<any[]>('list_tasks');
+        if (!disposed && Array.isArray(tasks)) {
+          for (const t of tasks) applyTask(t);
         }
-      }));
-      await reg(listen<any>('subprocess://error', e => {
-        if (!e.payload.taskId?.startsWith(WL)) return;
-        markDone(e.payload.taskId);
-        const msg = (e.payload.data?.msg || '').toLowerCase();
-        if (msg.includes('suspended') || msg.includes('banned')) {
-          const aid = extractId(e.payload.taskId);
-          if (aid) {
-            invoke('mark_account_disabled', {
-              accountId: aid,
-              reason: `Web login banned (${new Date().toISOString().slice(0, 10)})`,
-            }).then(() => fetchAccounts()).catch(() => {});
-          }
-        }
-      }));
-      await reg(listen<any>('subprocess://completed', e => { if (e.payload.taskId?.startsWith(WL)) { markDone(e.payload.taskId); fetchAccounts(); } }));
-      await reg(listen<any>('subprocess://failed', e => { if (e.payload.taskId?.startsWith(WL)) markDone(e.payload.taskId); }));
-    };
-    setup();
+      } catch {}
+    })();
     return () => { disposed = true; unlisteners.forEach(fn => fn()); };
   }, []);
 
@@ -580,7 +575,8 @@ function Accounts() {
                   onToggleProxy={handleToggleProxy}
                   onWebLogin={(a) => setWebLoginAccount(a)}
                   onWebOAuth={(a) => setOAuthAccount(a)}
-                  runningWebLogins={runningWebLogins}
+                  runningWebLogin={runningWebLogin}
+                  runningWebOAuth={runningWebOAuth}
                   onToast={(msg: string) => showToast(msg)}
                   refreshingQuota={refreshingQuota}
                   onRefreshQuota={handleRefreshSingle}
@@ -625,6 +621,7 @@ function Accounts() {
           onDelete={(a) => { setDetailsAccount(null); handleDelete(a); }}
           onToggleProxy={async (a) => { await handleToggleProxy(a); setDetailsAccount(null); }}
           onToast={(msg: string) => showToast(msg)}
+          onUpdated={() => fetchAccounts()}
         />
       )}
 
@@ -633,7 +630,6 @@ function Accounts() {
         <AccountWebLoginDialog
           account={webLoginAccount}
           onClose={() => setWebLoginAccount(null)}
-          onDone={() => { fetchAccounts(); }}
         />
       )}
 
@@ -642,7 +638,6 @@ function Accounts() {
         <AccountWebOAuthDialog
           account={webOAuthAccount}
           onClose={() => setOAuthAccount(null)}
-          onDone={() => { fetchAccounts(); }}
         />
       )}
 

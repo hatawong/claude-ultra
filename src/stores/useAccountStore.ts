@@ -8,10 +8,8 @@ import {
   toggleUserStatus as toggleUserApi,
   importAccounts as importAccountsApi,
   reorderAccounts as reorderAccountsApi,
-  addAccountAndLogin as addAccountAndLoginApi,
-  finalizeAccountImport as finalizeAccountImportApi,
 } from '../services/accountService';
-import type { ImportResult, AddAccountResult, FinalizeResult, OAuthTokenData } from '../services/accountService';
+import type { ImportResult } from '../services/accountService';
 
 interface AccountState {
   accounts: Account[];
@@ -28,8 +26,6 @@ interface AccountState {
   toggleUserStatus: (id: string, enable: boolean) => Promise<void>;
   importAccounts: (json: string) => Promise<ImportResult>;
   reorderAccounts: (ids: string[]) => Promise<void>;
-  addAccountAndLogin: () => Promise<AddAccountResult>;
-  finalizeAccountImport: (accountId: string, email: string, token: OAuthTokenData) => Promise<FinalizeResult>;
   refreshQuota: (accountId: string) => Promise<void>;
   setSelectedIds: (ids: Set<string>) => void;
   toggleSelected: (id: string) => void;
@@ -107,19 +103,6 @@ export const useAccountStore = create<AccountState>((set, get) => ({
       const remaining = state.accounts.filter((a) => !ids.includes(a.accountId));
       return { accounts: [...reordered, ...remaining] };
     });
-  },
-
-  addAccountAndLogin: async () => {
-    const result = await addAccountAndLoginApi();
-    await get().fetchAccounts();
-    return result;
-  },
-
-  finalizeAccountImport: async (accountId: string, email: string, token: OAuthTokenData) => {
-    const result = await finalizeAccountImportApi(accountId, email, token);
-    // Refresh to show updated profile + proxy info
-    await get().fetchAccounts();
-    return result;
   },
 
   refreshQuota: async (accountId: string) => {

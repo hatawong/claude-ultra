@@ -238,6 +238,8 @@
       "cli": "CLI 用戶端",
       "device": "裝置",
       "carrier": "電信商",
+      "country": "國家",
+      "country_updated": "國家已更新",
       "last_activity": "最後活動",
       "login": "登入",
       "keepalive": "保活",
@@ -255,7 +257,8 @@
       "delete_account": "刪除帳號",
       "oauth_reauth": "OAuth 重新授權",
       "proxy_country": "國家",
-      "proxy_region": "地區"
+      "proxy_region": "地區",
+      "route_updated": "路由已更新"
     },
     "toast": {
       "proxy_enabled": "成功啟用 {{count}} 個帳號的反向代理功能",
@@ -337,7 +340,8 @@
       "last_used": "最後使用",
       "actions": "操作",
       "proxy": "代理",
-      "last_activity": "最後活動"
+      "last_activity": "最後活動",
+      "route": "路由"
     },
     "drag_to_reorder": "拖拽排序",
     "empty": {
@@ -370,7 +374,12 @@
     "max": "Max",
     "refresh_confirm_title": "重新整理配額",
     "refresh_confirm_all": "重新整理全部 {{count}} 個有 CLI 憑證的帳號配額？",
-    "refresh_confirm_selected": "重新整理 {{count}} 個已選帳號的配額？"
+    "refresh_confirm_selected": "重新整理 {{count}} 個已選帳號的配額？",
+    "route": {
+      "proxy": "代理",
+      "direct": "直連",
+      "vercel": "Vercel"
+    }
   },
   "settings": {
     "save": "儲存設定",
@@ -947,6 +956,16 @@
       "placeholder": "（同 API 密鑰）",
       "hint": "在 Docker/Web 部署場景中，可設置獨立登入密碼提高安全性。"
     },
+    "transparent": {
+      "title": "透明稽核連接埠",
+      "description": "啟用後, 此連接埠上的所有請求將原樣透傳給 Anthropic, 僅記錄日誌, 不修改。",
+      "port_label": "連接埠",
+      "port_hint": "僅限本機存取, 重新啟動閘道以套用。",
+      "bound_to": "繫結",
+      "internal_badge": "僅限內部版本",
+      "status_running": "執行中",
+      "status_stopped": "已停止"
+    },
     "cli_sync": {
       "title": "CLI 配置一鍵同步",
       "desc": "快速將當前 API 服務地址與密鑰同步到 Claude Code CLI。",
@@ -959,6 +978,15 @@
       "synced": "已同步",
       "sync_now": "立即同步",
       "lan_snippet": "區域網 settings.json 片段"
+    },
+    "vercel": {
+      "title": "Vercel AI Gateway",
+      "api_key": "API Key",
+      "test": "测试连接",
+      "connected": "已连接",
+      "not_configured": "未配置",
+      "test_failed": "连接失败",
+      "not_tested": "未測試"
     }
   },
   "task": {
@@ -968,6 +996,7 @@
     "paused": "已暫停",
     "done": "完成",
     "failed": "失敗",
+    "aborted": "已中止",
     "pause": "暫停",
     "resume": "恢復",
     "abort": "終止",
