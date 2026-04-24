@@ -362,13 +362,15 @@ pub async fn init_services_inner(handle: &tauri::AppHandle) -> Result<(), String
         );
     }
 
-    // Dev mode: never auto-start gateway (avoid port conflict with production app)
-    #[cfg(debug_assertions)]
-    {
-        tracing::info!("Dev mode detected, skipping gateway auto-start.");
-    }
+    // TEMP: allow dev-mode auto-start by commenting out the cfg gates below.
+    // Restore the original "dev never auto-starts" behavior by re-enabling the
+    // two cfg attributes.
+    // #[cfg(debug_assertions)]
+    // {
+    //     tracing::info!("Dev mode detected, skipping gateway auto-start.");
+    // }
 
-    #[cfg(not(debug_assertions))]
+    // #[cfg(not(debug_assertions))]
     {
         let config = state.gateway_config.read().await.clone();
 
@@ -621,6 +623,9 @@ pub fn run() {
             commands::ui::set_window_theme,
             commands::ui::get_claude_settings,
             commands::ui::sync_claude_settings,
+            #[cfg(feature = "internal")]
+            commands::ui::sync_claude_settings_transparent,
+            commands::ui::restore_claude_settings,
             // Account management
             models::account::list_accounts,
             models::account::delete_account,

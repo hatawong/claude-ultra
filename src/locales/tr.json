@@ -1064,7 +1064,17 @@
             "auto_sync_desc": "Ortam değişkenlerini doğrudan ~/.claude/settings.json'a yaz (mevcut ayarları korur)",
             "synced": "Senkronize Edildi",
             "sync_now": "Şimdi Senkronize Et",
-            "lan_snippet": "LAN settings.json kod parçacığı"
+            "lan_snippet": "LAN settings.json kod parçacığı",
+            "transparent_snippet": "Şeffaf denetim settings.json env parçacığı",
+            "transparent_hint": "ANTHROPIC_API_KEY yok: şeffaf mod OAuth kimlik bilgilerini olduğu gibi yukarıya iletir.",
+            "auto_sync_transparent": "Şeffaf Denetim Moduna Otomatik Senkronize Et",
+            "auto_sync_transparent_desc": "CC CLI yi şeffaf denetim portuna geçirir ve ANTHROPIC_API_KEY i kaldırır (OAuth fallback).",
+            "confirm_transparent": "CC CLI yi şeffaf denetim portuna ({url}) geçir ve ~/.claude/settings.json içinden ANTHROPIC_API_KEY i kaldır (şeffaf mod OAuth gerektirir). Devam edilsin mi?",
+            "restore_title": "Varsayılan Ayarları Geri Yükle",
+            "restore_desc": "~/.claude/settings.json içinden ANTHROPIC_BASE_URL ve ANTHROPIC_API_KEY i kaldır (CC CLI varsayılan upstream e döner).",
+            "restore_now": "Varsayılana Sıfırla",
+            "restored": "Geri Yüklendi",
+            "confirm_restore": "~/.claude/settings.json içinden ANTHROPIC_BASE_URL ve ANTHROPIC_API_KEY i kaldır. CC CLI OAuth kimlik bilgileriyle varsayılan upstream e döner. Diğer ayarlar (telemetry / önbellek bayrakları) korunur. Devam edilsin mi?"
         },
         "vercel": {
             "title": "Vercel AI Gateway",

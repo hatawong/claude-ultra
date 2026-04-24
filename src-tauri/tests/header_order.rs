@@ -1,18 +1,29 @@
-//! Wire-level test: verifies outbound headers are sent in alphabetical order.
-//! Starts a TCP listener, sends a request via hyper, captures raw bytes.
+//! Wire-level outbound header order. Starts a TCP listener, sends a request
+//! via hyper, inspects the raw bytes, and verifies the header sequence
+//! matches the banded order produced by `build_outbound_headers`.
+//!
+//! This test also acts as a dependency-upgrade gate: the current
+//! implementation of `build_outbound_headers` relies on `http::HeaderMap`
+//! preserving insertion order when iterated. The `http` crate documents
+//! iteration order as arbitrary, so the invariant is not contractual.
+//! `Cargo.lock` pins a known-good version. If this test fails after
+//! bumping `http`, `hyper`, `hyper-util`, or `reqwest`, the upgraded
+//! version no longer matches what we ship on the wire; switch
+//! `build_outbound_headers` to return an ordered list before continuing.
 
 use bytes::Bytes;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 
-use claude_ultra_manager_lib::gateway::builder::{self as builder, RequestContext};
+use claude_ultra_manager_lib::gateway::builder::{
+    self as builder, RequestContext, EXPECTED_OUTBOUND_HEADER_ORDER,
+};
 
 #[tokio::test]
-async fn test_header_wire_order_is_alphabetical() {
+async fn test_outbound_header_order_on_wire() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
 
-    // Build outbound headers using our fingerprint module
     let mut client_headers = http::HeaderMap::new();
     client_headers.insert("accept", "application/json".parse().unwrap());
     client_headers.insert("accept-encoding", "gzip, deflate, br, zstd".parse().unwrap());
@@ -25,7 +36,7 @@ async fn test_header_wire_order_is_alphabetical() {
     client_headers.insert("connection", "keep-alive".parse().unwrap());
     client_headers.insert("content-type", "application/json".parse().unwrap());
     client_headers.insert("host", "localhost:9000".parse().unwrap());
-    client_headers.insert("user-agent", "claude-cli/2.1.92 (subscriber, cli)".parse().unwrap());
+    client_headers.insert("user-agent", "claude-cli/0.0.0 (subscriber, cli)".parse().unwrap());
     client_headers.insert("x-api-key", "test-key".parse().unwrap());
     client_headers.insert("x-app", "cli".parse().unwrap());
     client_headers.insert("x-claude-code-session-id", "old-session".parse().unwrap());
@@ -48,7 +59,6 @@ async fn test_header_wire_order_is_alphabetical() {
     let body_bytes = b"{}";
     let outbound_headers = builder::build_outbound_headers(&client_headers, &account, body_bytes.len(), "api.anthropic.com", None);
 
-    // Spawn client request
     let headers_clone = outbound_headers.clone();
     let send_task = tokio::spawn(async move {
         use http_body_util::Full;
@@ -71,7 +81,6 @@ async fn test_header_wire_order_is_alphabetical() {
         let _ = client.request(request).await;
     });
 
-    // Accept and read with timeout
     let (mut stream, _) = listener.accept().await.unwrap();
     let mut buf = vec![0u8; 8192];
     let n = tokio::time::timeout(
@@ -87,10 +96,6 @@ async fn test_header_wire_order_is_alphabetical() {
     drop(listener);
     let _ = send_task.await;
 
-    println!("=== Raw HTTP request on wire ===");
-    println!("{}", raw);
-
-    // Parse header names in wire order
     let lines: Vec<&str> = raw.lines().collect();
     assert!(lines[0].starts_with("POST"), "First line should be POST");
 
@@ -104,28 +109,19 @@ async fn test_header_wire_order_is_alphabetical() {
         }
     }
 
-    println!("\n=== Wire header order ===");
-    for (i, name) in wire_headers.iter().enumerate() {
-        println!("  {}. {}", i + 1, name);
-    }
-
-    // Filter out headers hyper adds automatically (transfer-encoding)
-    // content-length is now part of our sorted headers
-    let our_headers: Vec<String> = wire_headers
+    // `transfer-encoding` is injected by hyper and is not part of the
+    // application-controlled header set.
+    let filtered: Vec<String> = wire_headers
         .iter()
         .filter(|h| *h != "transfer-encoding")
         .cloned()
         .collect();
-    let mut expected = our_headers.clone();
-    expected.sort();
 
-    assert_eq!(
-        our_headers, expected,
-        "\nHeaders NOT in alphabetical order on wire!\nWire:   {:?}\nSorted: {:?}",
-        our_headers, expected
-    );
-
-    println!("\nWire header order: ALPHABETICAL CONFIRMED");
+    let expected: Vec<String> = EXPECTED_OUTBOUND_HEADER_ORDER
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(filtered, expected);
 }
 
 #[test]
@@ -137,31 +133,30 @@ fn test_vercel_host_header() {
         mapped_session_uuid: "sess-uuid".to_string(),
     };
     let mut client_headers = http::HeaderMap::new();
-    client_headers.insert("user-agent", "claude-cli/2.1.114 (external, cli)".parse().unwrap());
+    client_headers.insert("user-agent", "claude-cli/0.0.0 (external, cli)".parse().unwrap());
     client_headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+    client_headers.insert("x-app", "cli".parse().unwrap());
 
     let headers = builder::build_outbound_headers(&client_headers, &account, 100, "ai-gateway.vercel.sh", Some("vck_test_key"));
     assert_eq!(
         headers.get("host").unwrap().to_str().unwrap(),
         "ai-gateway.vercel.sh",
-        "Vercel upstream should set host to ai-gateway.vercel.sh"
     );
 
-    // x-ai-gateway-api-key present and in sorted position
     let vck = headers.get("x-ai-gateway-api-key").expect("missing x-ai-gateway-api-key");
-    assert!(vck.to_str().unwrap().starts_with("Bearer vck_"), "vck should be Bearer format");
-    // Verify alphabetical: x-ai-gateway-api-key < x-claude-code-session-id
-    let names: Vec<String> = headers.iter().map(|(n, _)| n.as_str().to_string()).collect();
-    let ai_pos = names.iter().position(|n| n == "x-ai-gateway-api-key").unwrap();
-    let sess_pos = names.iter().position(|n| n == "x-claude-code-session-id").unwrap();
-    assert!(ai_pos < sess_pos, "x-ai-gateway-api-key should come before x-claude-code-session-id");
+    assert!(vck.to_str().unwrap().starts_with("Bearer vck_"));
 
-    // Anthropic mode: no x-ai-gateway-api-key
+    let names: Vec<String> = headers.iter().map(|(n, _)| n.as_str().to_string()).collect();
+    let session_pos = names.iter().position(|n| n == "x-claude-code-session-id").unwrap();
+    let vck_pos = names.iter().position(|n| n == "x-ai-gateway-api-key").unwrap();
+    let app_pos = names.iter().position(|n| n == "x-app").unwrap();
+    assert!(session_pos < vck_pos, "session id should come before vck in the banded order");
+    assert!(vck_pos < app_pos, "vck should come before x-app alphabetically within its band");
+
     let headers_anthropic = builder::build_outbound_headers(&client_headers, &account, 100, "api.anthropic.com", None);
     assert_eq!(
         headers_anthropic.get("host").unwrap().to_str().unwrap(),
         "api.anthropic.com",
-        "Anthropic upstream should set host to api.anthropic.com"
     );
-    assert!(headers_anthropic.get("x-ai-gateway-api-key").is_none(), "Anthropic mode should not have vck header");
+    assert!(headers_anthropic.get("x-ai-gateway-api-key").is_none());
 }

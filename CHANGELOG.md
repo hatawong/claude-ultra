@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.3.119 — 2026-04-23
+
+### Improvements
+
+- **Claude Code CLI 2.1.119 support** — MAX_SUPPORTED_VERSION upgraded from 2.1.118
+
 ## v1.2.118 — 2026-04-23
 
 ### Improvements

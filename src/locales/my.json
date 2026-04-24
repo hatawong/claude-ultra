@@ -944,7 +944,17 @@
             "auto_sync_desc": "Tulis pemboleh ubah persekitaran terus ke ~/.claude/settings.json (kekalkan tetapan sedia ada)",
             "synced": "Disegerakkan",
             "sync_now": "Segerak Sekarang",
-            "lan_snippet": "Petikan settings.json LAN"
+            "lan_snippet": "Petikan settings.json LAN",
+            "transparent_snippet": "Cuplikan env settings.json audit telus",
+            "transparent_hint": "Tiada ANTHROPIC_API_KEY: mod telus menghantar kelayakan OAuth ke huluan seperti adanya.",
+            "auto_sync_transparent": "Penyegerakan Auto ke Mod Audit Telus",
+            "auto_sync_transparent_desc": "Tukar CC CLI ke port audit telus dan buang ANTHROPIC_API_KEY (sandaran OAuth).",
+            "confirm_transparent": "Tukar CC CLI ke port audit telus ({url}) dan buang ANTHROPIC_API_KEY daripada ~/.claude/settings.json (mod telus memerlukan OAuth). Teruskan?",
+            "restore_title": "Pulihkan Tetapan Asal",
+            "restore_desc": "Buang ANTHROPIC_BASE_URL dan ANTHROPIC_API_KEY daripada ~/.claude/settings.json (CC CLI kembali ke huluan asal).",
+            "restore_now": "Pulihkan Asal",
+            "restored": "Dipulihkan",
+            "confirm_restore": "Buang ANTHROPIC_BASE_URL dan ANTHROPIC_API_KEY daripada ~/.claude/settings.json. CC CLI akan kembali ke huluan asal dengan kelayakan OAuth. Tetapan lain (telemetry / bendera cache) dikekalkan. Teruskan?"
         },
         "vercel": {
             "title": "Vercel AI Gateway",

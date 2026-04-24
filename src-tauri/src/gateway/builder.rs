@@ -36,9 +36,9 @@ const HEADERS_TO_REMOVE: &[&str] = &[
     "transfer-encoding",
 ];
 
-/// Build outbound headers for proxied request.
-/// Headers are inserted in alphabetical order to match Bun's behavior.
-/// `content_length` is the final body size (after metadata replacement).
+/// Build outbound headers for the proxied request.
+/// Headers are emitted in the grouped order defined by `outbound_order_key`;
+/// `content_length` is the final body size after metadata replacement.
 pub fn build_outbound_headers(
     client_headers: &HeaderMap,
     request_context: &RequestContext,
@@ -92,10 +92,13 @@ pub fn build_outbound_headers(
         entries.push(("x-claude-code-session-id".to_string(), v));
     }
 
-    // Add x-client-request-id (new UUID per request)
-    let request_id = uuid::Uuid::new_v4().to_string();
-    if let Ok(v) = HeaderValue::from_str(&request_id) {
-        entries.push(("x-client-request-id".to_string(), v));
+    // Mirror the client's native behavior: the request-id header is only
+    // attached when the final destination is the Anthropic API directly.
+    if upstream_host == "api.anthropic.com" {
+        let request_id = uuid::Uuid::new_v4().to_string();
+        if let Ok(v) = HeaderValue::from_str(&request_id) {
+            entries.push(("x-client-request-id".to_string(), v));
+        }
     }
 
     // Add content-length (must be in sorted position, not appended after)
@@ -111,13 +114,10 @@ pub fn build_outbound_headers(
         }
     }
 
-    // Ensure anthropic-beta contains oauth-2025-04-20
     ensure_oauth_beta(&mut entries);
 
-    // Sort by header name (alphabetical) to match Bun's behavior
-    entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+    entries.sort_by_cached_key(|(name, _)| outbound_order_key(name));
 
-    // Build HeaderMap in sorted order
     let mut result = HeaderMap::new();
     for (name, value) in entries {
         if let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) {
@@ -127,6 +127,76 @@ pub fn build_outbound_headers(
 
     result
 }
+
+/// Sort key that groups header names into bands with a fixed relative order,
+/// then sorts alphabetically within each band. The final band (HTTP runtime
+/// headers) has a fixed internal order instead of alphabetical. Unknown names
+/// fall into the penultimate band so the overall layout stays stable when
+/// new names are introduced upstream.
+pub fn outbound_order_key(name: &str) -> (u8, u8, String) {
+    let n = name.to_ascii_lowercase();
+
+    let runtime_idx = match n.as_str() {
+        "connection" => Some(0u8),
+        "host" => Some(1u8),
+        "accept-encoding" => Some(2u8),
+        "content-length" => Some(3u8),
+        _ => None,
+    };
+    if let Some(idx) = runtime_idx {
+        return (4, idx, String::new());
+    }
+
+    const BAND_CORE: &[&str] = &[
+        "accept",
+        "authorization",
+        "content-type",
+        "user-agent",
+        "x-claude-code-session-id",
+    ];
+    if BAND_CORE.contains(&n.as_str()) {
+        return (0, 0, n);
+    }
+
+    if n.starts_with("x-stainless-") {
+        return (1, 0, n);
+    }
+
+    if n.starts_with("anthropic-") {
+        return (2, 0, n);
+    }
+
+    (3, 0, n)
+}
+
+/// Canonical outbound header order produced by `build_outbound_headers`
+/// for the full client-supplied input set. Used by both the unit test in
+/// this module and the wire-level integration test; keep the two in sync
+/// by consuming this constant from both call sites.
+pub const EXPECTED_OUTBOUND_HEADER_ORDER: &[&str] = &[
+    "accept",
+    "authorization",
+    "content-type",
+    "user-agent",
+    "x-claude-code-session-id",
+    "x-stainless-arch",
+    "x-stainless-lang",
+    "x-stainless-os",
+    "x-stainless-package-version",
+    "x-stainless-retry-count",
+    "x-stainless-runtime",
+    "x-stainless-runtime-version",
+    "x-stainless-timeout",
+    "anthropic-beta",
+    "anthropic-dangerous-direct-browser-access",
+    "anthropic-version",
+    "x-app",
+    "x-client-request-id",
+    "connection",
+    "host",
+    "accept-encoding",
+    "content-length",
+];
 
 /// Merge `oauth-2025-04-20` into a client-supplied `anthropic-beta` header.
 ///
@@ -265,7 +335,7 @@ mod tests {
         h.insert("connection", "keep-alive".parse().unwrap());
         h.insert("content-type", "application/json".parse().unwrap());
         h.insert("host", "localhost:9000".parse().unwrap());
-        h.insert("user-agent", "claude-cli/2.1.92 (subscriber, cli)".parse().unwrap());
+        h.insert("user-agent", "claude-cli/0.0.0 (subscriber, cli)".parse().unwrap());
         h.insert("x-api-key", "claude-ultra-proxy-key".parse().unwrap());
         h.insert("x-app", "cli".parse().unwrap());
         h.insert("x-claude-code-session-id", "client-session-id".parse().unwrap());
@@ -323,6 +393,21 @@ mod tests {
         // UUID format: 8-4-4-4-12
         assert_eq!(id_str.len(), 36);
         assert_eq!(id_str.chars().filter(|c| *c == '-').count(), 4);
+    }
+
+    #[test]
+    fn test_x_client_request_id_absent_for_non_anthropic_upstream() {
+        let headers = build_outbound_headers(
+            &sample_client_headers(),
+            &test_account(),
+            1024,
+            "ai-gateway.vercel.sh",
+            Some("vck_test"),
+        );
+        assert!(
+            headers.get("x-client-request-id").is_none(),
+            "x-client-request-id must only be sent to the native upstream"
+        );
     }
 
     #[test]
@@ -390,7 +475,7 @@ mod tests {
         let headers = build_outbound_headers(&sample_client_headers(), &test_account(), 1024, "api.anthropic.com", None);
         assert_eq!(
             headers.get("user-agent").unwrap().to_str().unwrap(),
-            "claude-cli/2.1.92 (subscriber, cli)"
+            "claude-cli/0.0.0 (subscriber, cli)"
         );
     }
 
@@ -417,12 +502,20 @@ mod tests {
     }
 
     #[test]
-    fn test_headers_sorted_alphabetically() {
-        let headers = build_outbound_headers(&sample_client_headers(), &test_account(), 1024, "api.anthropic.com", None);
+    fn test_outbound_header_order() {
+        let headers = build_outbound_headers(
+            &sample_client_headers(),
+            &test_account(),
+            1024,
+            "api.anthropic.com",
+            None,
+        );
         let names: Vec<String> = headers.keys().map(|k| k.as_str().to_string()).collect();
-        let mut sorted = names.clone();
-        sorted.sort();
-        assert_eq!(names, sorted, "headers must be in alphabetical order");
+        let expected: Vec<String> = EXPECTED_OUTBOUND_HEADER_ORDER
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(names, expected);
     }
 
     // ── URL building ─────────────────────────────────────────────────────

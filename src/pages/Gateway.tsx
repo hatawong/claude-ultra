@@ -49,8 +49,23 @@ export default function Gateway() {
   const [vercelTesting, setVercelTesting] = useState(false);
   const [vercelStatus, setVercelStatus] = useState<'unknown' | 'connected' | 'failed'>('unknown');
   // CLI sync states
-  const [syncing, setSyncing] = useState(false);
-  const [syncSuccess, setSyncSuccess] = useState(false);
+  const [syncingMode, setSyncingMode] = useState<'proxy' | 'transparent' | 'restore' | null>(null);
+  const [currentEnv, setCurrentEnv] = useState<{
+    ANTHROPIC_BASE_URL?: string;
+    ANTHROPIC_API_KEY?: string;
+  }>({});
+
+  const loadCurrentSettings = async () => {
+    try {
+      const data = await invoke<{ env?: Record<string, string> }>('get_claude_settings');
+      setCurrentEnv({
+        ANTHROPIC_BASE_URL: data?.env?.ANTHROPIC_BASE_URL,
+        ANTHROPIC_API_KEY: data?.env?.ANTHROPIC_API_KEY,
+      });
+    } catch (e) {
+      console.error('Failed to load Claude settings', e);
+    }
+  };
 
   const loadInfo = async () => {
     try {
@@ -65,9 +80,11 @@ export default function Gateway() {
 
   useEffect(() => {
     loadInfo();
+    loadCurrentSettings();
     const interval = setInterval(loadInfo, 5000);
     return () => clearInterval(interval);
   }, []);
+
 
   const copyToClipboard = async (text: string, label: string) => {
     await navigator.clipboard.writeText(text);
@@ -146,19 +163,55 @@ export default function Gateway() {
   };
 
   const handleSyncClaude = async () => {
-    setSyncing(true);
-    setSyncSuccess(false);
+    setSyncingMode('proxy');
     try {
       await invoke('sync_claude_settings', {
         baseUrl: localEndpoint,
         apiKey: info?.apiKey || '',
       });
-      setSyncSuccess(true);
-      setTimeout(() => setSyncSuccess(false), 3000);
+      await loadCurrentSettings();
     } catch (e) {
       console.error('Failed to sync Claude settings', e);
     } finally {
-      setSyncing(false);
+      setSyncingMode(null);
+    }
+  };
+
+  const handleSyncClaudeTransparent = async () => {
+    const port = info?.transparentPort ?? 9001;
+    const baseUrl = `http://localhost:${port}`;
+    const message = t(
+      'gateway.cli_sync.confirm_transparent',
+      'Switch CC CLI to the transparent audit port ({url}) and remove ANTHROPIC_API_KEY from ~/.claude/settings.json (OAuth required for transparent mode). Continue?',
+    ).replace('{url}', baseUrl);
+    const ok = window.confirm(message);
+    if (!ok) return;
+    setSyncingMode('transparent');
+    try {
+      await invoke('sync_claude_settings_transparent', { baseUrl });
+      await loadCurrentSettings();
+    } catch (e) {
+      console.error('Failed to sync Claude settings (transparent)', e);
+    } finally {
+      setSyncingMode(null);
+    }
+  };
+
+  const handleRestoreClaude = async () => {
+    const message = t(
+      'gateway.cli_sync.confirm_restore',
+      'Remove ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY from ~/.claude/settings.json. CC CLI will revert to its default upstream with OAuth credentials. Other settings (telemetry / cache flags) are kept. Continue?',
+    );
+    const ok = window.confirm(message);
+    if (!ok) return;
+    setSyncingMode('restore');
+    try {
+      await invoke('restore_claude_settings');
+      await loadCurrentSettings();
+    } catch (e) {
+      console.error('Failed to restore Claude settings', e);
+    } finally {
+      setSyncingMode(null);
     }
   };
 
@@ -184,6 +237,17 @@ export default function Gateway() {
   const isLan = info?.bindAddress === '0.0.0.0';
   const localEndpoint = `http://localhost:${info?.port}`;
   const lanBaseUrl = info?.lanIp ? `http://${info.lanIp}:${info?.port}` : null;
+
+  // Derive which CLI sync mode is currently active in ~/.claude/settings.json.
+  const activeMode: 'proxy' | 'transparent' | 'restored' | 'unknown' = (() => {
+    const url = currentEnv.ANTHROPIC_BASE_URL;
+    const hasKey = Boolean(currentEnv.ANTHROPIC_API_KEY);
+    if (!url && !hasKey) return 'restored';
+    const transparentPort = info?.transparentPort ?? 9001;
+    if (url === `http://localhost:${transparentPort}`) return 'transparent';
+    if (url === localEndpoint && hasKey) return 'proxy';
+    return 'unknown';
+  })();
 
   return (
     <div className="h-full w-full overflow-y-auto overflow-x-hidden">
@@ -666,23 +730,24 @@ export default function Gateway() {
                   {t('gateway.cli_sync.auto_sync_desc', 'Write env vars directly into ~/.claude/settings.json (preserves existing settings)')}
                 </p>
               </div>
-              <button
-                onClick={handleSyncClaude}
-                disabled={syncing}
-                className={cn(
-                  'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5',
-                  syncSuccess
-                    ? 'bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400'
-                    : 'bg-blue-600 hover:bg-blue-700 text-white shadow-sm shadow-blue-500/30',
-                  syncing && 'opacity-50 cursor-not-allowed',
-                )}
-              >
-                {syncSuccess ? (
-                  <><Check size={14} /> {t('gateway.cli_sync.synced', 'Synced')}</>
-                ) : (
-                  <><RefreshCw size={14} className={syncing ? 'animate-spin' : ''} /> {t('gateway.cli_sync.sync_now', 'Sync Now')}</>
-                )}
-              </button>
+              {activeMode === 'proxy' ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400">
+                  <Check size={14} /> {t('gateway.cli_sync.synced', 'Synced')}
+                </span>
+              ) : (
+                <button
+                  onClick={handleSyncClaude}
+                  disabled={syncingMode !== null}
+                  className={cn(
+                    'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5',
+                    'bg-blue-600 hover:bg-blue-700 text-white shadow-sm shadow-blue-500/30',
+                    syncingMode !== null && 'opacity-50 cursor-not-allowed',
+                  )}
+                >
+                  <RefreshCw size={14} className={syncingMode === 'proxy' ? 'animate-spin' : ''} />
+                  {t('gateway.cli_sync.sync_now', 'Sync Now')}
+                </button>
+              )}
             </div>
 
             {/* LAN JSON snippet (if enabled) */}
@@ -710,6 +775,99 @@ export default function Gateway() {
                 </pre>
               </div>
             )}
+
+            {/* Transparent audit mode sync (internal builds + transparent enabled) */}
+            {authStatus?.mode === 'internal' && info?.transparentEnabled && (
+              <div className="border-t border-gray-200 dark:border-base-300 pt-3">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-medium text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
+                    {t('gateway.cli_sync.transparent_snippet', 'Transparent audit settings.json env snippet')}
+                    <span className="ml-1.5 inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+                      {t('gateway.transparent.internal_badge', 'Internal Only')}
+                    </span>
+                  </span>
+                  <button
+                    onClick={() => {
+                      const port = info?.transparentPort ?? 9001;
+                      copyToClipboard(
+                        `"env": {\n  "ANTHROPIC_BASE_URL": "http://localhost:${port}",\n  "DISABLE_TELEMETRY": "1",\n  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",\n  "ENABLE_PROMPT_CACHING_1H": "1"\n}`,
+                        'transparent-json',
+                      );
+                    }}
+                    className="text-xs text-gray-400 hover:text-blue-500 transition-colors flex items-center gap-1"
+                  >
+                    {copied === 'transparent-json' ? <Check size={12} className="text-green-500" /> : <Copy size={12} />}
+                    {copied === 'transparent-json' ? t('common.copied', 'Copied') : t('common.copy_all', 'Copy All')}
+                  </button>
+                </div>
+                <pre className="bg-amber-900/20 dark:bg-amber-900/15 rounded-lg p-3 text-[11px] font-mono text-amber-200 overflow-x-auto select-text leading-relaxed">
+                  <JsonHighlight json={`"env": {\n  "ANTHROPIC_BASE_URL": "http://localhost:${info?.transparentPort ?? 9001}",\n  "DISABLE_TELEMETRY": "1",\n  "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",\n  "ENABLE_PROMPT_CACHING_1H": "1"\n}`} />
+                </pre>
+                <p className="mt-1 text-[10px] text-gray-500 dark:text-gray-400">
+                  {t('gateway.cli_sync.transparent_hint', 'No ANTHROPIC_API_KEY: transparent mode passes through OAuth credentials to the upstream as-is.')}
+                </p>
+                <div className="flex items-center justify-between mt-3 p-3 bg-amber-50 dark:bg-amber-900/10 rounded-lg">
+                  <div>
+                    <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                      {t('gateway.cli_sync.auto_sync_transparent', 'Auto Sync to Transparent Mode')}
+                    </span>
+                    <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
+                      {t('gateway.cli_sync.auto_sync_transparent_desc', 'Switch CC CLI to the transparent audit port and remove ANTHROPIC_API_KEY (OAuth fallback).')}
+                    </p>
+                  </div>
+                  {activeMode === 'transparent' ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400">
+                      <Check size={14} /> {t('gateway.cli_sync.synced', 'Synced')}
+                    </span>
+                  ) : (
+                    <button
+                      onClick={handleSyncClaudeTransparent}
+                      disabled={syncingMode !== null}
+                      className={cn(
+                        'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5',
+                        'bg-amber-600 hover:bg-amber-700 text-white shadow-sm shadow-amber-500/30',
+                        syncingMode !== null && 'opacity-50 cursor-not-allowed',
+                      )}
+                    >
+                      <RefreshCw size={14} className={syncingMode === 'transparent' ? 'animate-spin' : ''} />
+                      {t('gateway.cli_sync.sync_now', 'Sync Now')}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Restore: remove gateway env (BASE_URL + API_KEY) from settings.json */}
+            <div className="border-t border-gray-200 dark:border-base-300 pt-3">
+              <div className="flex items-center justify-between p-3 bg-gray-50 dark:bg-base-200 rounded-lg">
+                <div>
+                  <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
+                    {t('gateway.cli_sync.restore_title', 'Restore Default Settings')}
+                  </span>
+                  <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">
+                    {t('gateway.cli_sync.restore_desc', 'Remove ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY from ~/.claude/settings.json (CC CLI reverts to default upstream).')}
+                  </p>
+                </div>
+                {activeMode === 'restored' ? (
+                  <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400">
+                    <Check size={14} /> {t('gateway.cli_sync.restored', 'Restored')}
+                  </span>
+                ) : (
+                  <button
+                    onClick={handleRestoreClaude}
+                    disabled={syncingMode !== null}
+                    className={cn(
+                      'px-3 py-1.5 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5',
+                      'bg-gray-600 hover:bg-gray-700 text-white shadow-sm shadow-gray-500/30',
+                      syncingMode !== null && 'opacity-50 cursor-not-allowed',
+                    )}
+                  >
+                    <RefreshCw size={14} className={syncingMode === 'restore' ? 'animate-spin' : ''} />
+                    {t('gateway.cli_sync.restore_now', 'Restore Default')}
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </CollapsibleCard>
 

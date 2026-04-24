@@ -1075,7 +1075,17 @@
             "auto_sync_desc": "كتابة متغيرات البيئة مباشرة في ~/.claude/settings.json (مع الحفاظ على الإعدادات الحالية)",
             "synced": "تمت المزامنة",
             "sync_now": "مزامنة الآن",
-            "lan_snippet": "مقتطف settings.json للشبكة المحلية"
+            "lan_snippet": "مقتطف settings.json للشبكة المحلية",
+            "transparent_snippet": "مقتطف env في settings.json للتدقيق الشفاف",
+            "transparent_hint": "بدون ANTHROPIC_API_KEY: الوضع الشفاف يمرر اعتماد OAuth إلى المنبع كما هو.",
+            "auto_sync_transparent": "مزامنة تلقائية إلى وضع التدقيق الشفاف",
+            "auto_sync_transparent_desc": "تبديل CC CLI إلى منفذ التدقيق الشفاف وإزالة ANTHROPIC_API_KEY (الاحتياطي OAuth).",
+            "confirm_transparent": "تبديل CC CLI إلى منفذ التدقيق الشفاف ({url}) وإزالة ANTHROPIC_API_KEY من ~/.claude/settings.json (الوضع الشفاف يتطلب OAuth). هل تريد المتابعة?",
+            "restore_title": "استعادة الإعدادات الافتراضية",
+            "restore_desc": "إزالة ANTHROPIC_BASE_URL و ANTHROPIC_API_KEY من ~/.claude/settings.json (يعود CC CLI إلى المنبع الافتراضي).",
+            "restore_now": "استعادة الافتراضي",
+            "restored": "تمت الاستعادة",
+            "confirm_restore": "إزالة ANTHROPIC_BASE_URL و ANTHROPIC_API_KEY من ~/.claude/settings.json. سيعود CC CLI إلى المنبع الافتراضي مع اعتماد OAuth. تبقى الإعدادات الأخرى (telemetry / إشارات الكاش) كما هي. هل تريد المتابعة?"
         },
         "vercel": {
             "title": "Vercel AI Gateway",

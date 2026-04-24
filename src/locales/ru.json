@@ -1064,7 +1064,17 @@
             "auto_sync_desc": "Записать переменные окружения прямо в ~/.claude/settings.json (существующие настройки сохранятся)",
             "synced": "Синхронизировано",
             "sync_now": "Синхронизировать",
-            "lan_snippet": "Фрагмент settings.json для LAN"
+            "lan_snippet": "Фрагмент settings.json для LAN",
+            "transparent_snippet": "Фрагмент env settings.json для прозрачного аудита",
+            "transparent_hint": "Без ANTHROPIC_API_KEY: прозрачный режим передаёт OAuth-учётные данные наверх как есть.",
+            "auto_sync_transparent": "Автосинхронизация в режим прозрачного аудита",
+            "auto_sync_transparent_desc": "Переключить CC CLI на порт прозрачного аудита и удалить ANTHROPIC_API_KEY (откат на OAuth).",
+            "confirm_transparent": "Переключить CC CLI на порт прозрачного аудита ({url}) и удалить ANTHROPIC_API_KEY из ~/.claude/settings.json (прозрачный режим требует OAuth). Продолжить?",
+            "restore_title": "Восстановить настройки по умолчанию",
+            "restore_desc": "Удалить ANTHROPIC_BASE_URL и ANTHROPIC_API_KEY из ~/.claude/settings.json (CC CLI вернётся к upstream по умолчанию).",
+            "restore_now": "Восстановить по умолчанию",
+            "restored": "Восстановлено",
+            "confirm_restore": "Удалить ANTHROPIC_BASE_URL и ANTHROPIC_API_KEY из ~/.claude/settings.json. CC CLI вернётся к upstream по умолчанию с OAuth-учётными данными. Остальные настройки (telemetry / cache flags) сохраняются. Продолжить?"
         },
         "vercel": {
             "title": "Vercel AI Gateway",

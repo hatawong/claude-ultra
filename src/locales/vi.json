@@ -1063,7 +1063,17 @@
             "auto_sync_desc": "Ghi biến môi trường trực tiếp vào ~/.claude/settings.json (giữ nguyên cài đặt hiện có)",
             "synced": "Đã đồng bộ",
             "sync_now": "Đồng bộ Ngay",
-            "lan_snippet": "Đoạn settings.json LAN"
+            "lan_snippet": "Đoạn settings.json LAN",
+            "transparent_snippet": "Đoạn settings.json env transparent audit",
+            "transparent_hint": "Không có ANTHROPIC_API_KEY: chế độ transparent chuyển thẳng OAuth credentials lên upstream.",
+            "auto_sync_transparent": "Tự động đồng bộ sang chế độ Transparent Audit",
+            "auto_sync_transparent_desc": "Chuyển CC CLI sang cổng transparent audit và xoá ANTHROPIC_API_KEY (fallback OAuth).",
+            "confirm_transparent": "Chuyển CC CLI sang cổng transparent audit ({url}) và xoá ANTHROPIC_API_KEY khỏi ~/.claude/settings.json (chế độ transparent bắt buộc OAuth). Tiếp tục?",
+            "restore_title": "Khôi phục cài đặt mặc định",
+            "restore_desc": "Xoá ANTHROPIC_BASE_URL và ANTHROPIC_API_KEY khỏi ~/.claude/settings.json (CC CLI quay về upstream mặc định).",
+            "restore_now": "Khôi phục mặc định",
+            "restored": "Đã khôi phục",
+            "confirm_restore": "Xoá ANTHROPIC_BASE_URL và ANTHROPIC_API_KEY khỏi ~/.claude/settings.json. CC CLI sẽ quay về upstream mặc định bằng OAuth. Các cài đặt khác (telemetry / cache flag) được giữ nguyên. Tiếp tục?"
         },
         "vercel": {
             "title": "Vercel AI Gateway",

@@ -6,7 +6,7 @@ use claude_ultra_http::compute_fp;
 use semver::Version;
 use serde_json::Value;
 
-pub const MAX_SUPPORTED_VERSION: &str = "2.1.118";
+pub const MAX_SUPPORTED_VERSION: &str = "2.1.119";
 
 fn clamp_user_agent(original_ua: &str, original_version: &Version, target_version: &str) -> String {
     let version_str = format!("{}", original_version);
@@ -482,13 +482,13 @@ mod tests {
         let body = br#"{"messages":[{"role":"user","content":"hi"}],"system":[{"type":"text","text":"cc_version=2.1.200.bf1; cc_entrypoint=cli; cch=xxxxx;"}]}"#;
         let p = gate(body, Some("claude-cli/2.1.200 (external, cli)")).unwrap();
         assert!(p.was_clamped());
-        assert_eq!(p.ua_override.as_deref(), Some("claude-cli/2.1.118 (external, cli)"));
+        assert_eq!(p.ua_override.as_deref(), Some("claude-cli/2.1.119 (external, cli)"));
         let text = p.value["system"][0]["text"].as_str().unwrap();
         // fp recomputed with clamped version
-        assert!(text.contains("cc_version=2.1.118."), "clamped to MAX, got: {}", text);
+        assert!(text.contains("cc_version=2.1.119."), "clamped to MAX, got: {}", text);
         assert!(text.contains("cch=00000"));
         assert!(!text.contains("2.1.200"));
-        assert_eq!(p.version, Version::new(2, 1, 118));
+        assert_eq!(p.version, Version::new(2, 1, 119));
     }
 
     #[test]

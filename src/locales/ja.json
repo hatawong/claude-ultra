@@ -1006,7 +1006,17 @@
             "auto_sync_desc": "~/.claude/settings.jsonに直接書込（既存設定保持）",
             "synced": "同期完了",
             "sync_now": "今すぐ同期",
-            "lan_snippet": "LAN settings.json 設定"
+            "lan_snippet": "LAN settings.json 設定",
+            "transparent_snippet": "Transparent audit settings.json env スニペット",
+            "transparent_hint": "ANTHROPIC_API_KEY を書かない: transparent モードは OAuth 認証情報をそのまま上流に渡します。",
+            "auto_sync_transparent": "Transparent Audit モードに自動同期",
+            "auto_sync_transparent_desc": "CC CLI を transparent audit ポートに切り替え、ANTHROPIC_API_KEY を削除します (OAuth フォールバック)。",
+            "confirm_transparent": "CC CLI を transparent audit ポート ({url}) に切り替え、~/.claude/settings.json から ANTHROPIC_API_KEY を削除します (transparent モードは OAuth が必須)。続行しますか?",
+            "restore_title": "デフォルト設定を復元",
+            "restore_desc": "~/.claude/settings.json から ANTHROPIC_BASE_URL と ANTHROPIC_API_KEY を削除します (CC CLI はデフォルトの上流に戻ります)。",
+            "restore_now": "デフォルト復元",
+            "restored": "復元済み",
+            "confirm_restore": "~/.claude/settings.json から ANTHROPIC_BASE_URL と ANTHROPIC_API_KEY を削除します。CC CLI は OAuth 認証情報でデフォルトの上流に戻ります。その他の設定 (テレメトリ / キャッシュフラグ) は保持されます。続行しますか?"
         },
         "vercel": {
             "title": "Vercel AI Gateway",

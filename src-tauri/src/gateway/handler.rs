@@ -161,7 +161,15 @@ async fn gateway_request(
     let prepared = match super::policy::gate(&body_bytes, user_agent.as_deref()) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!("policy rejected: {:?}", e);
+            let query = parts.uri.query().unwrap_or("");
+            let preview: String = String::from_utf8_lossy(&body_bytes)
+                .chars()
+                .take(200)
+                .collect();
+            tracing::warn!(
+                "policy rejected: {:?} path={} query={:?} body_preview={:?}",
+                e, path, query, preview
+            );
             let body = serde_json::json!({
                 "type": "error",
                 "error": {
@@ -272,10 +280,6 @@ async fn gateway_request(
         };
 
         let account_id = cli.account_id.clone();
-        tracing::info!(
-            "account={}, model={}, path={}",
-            account_id, model, path
-        );
 
         let runtime = match state.client_manager.get_runtime_state(&account_id) {
             Some(r) => r,
@@ -531,7 +535,6 @@ async fn gateway_request(
             };
 
             let status = resp.status();
-            tracing::info!("status={}, account={}", status, account_id);
 
             // Parse rate-limit headers
             if let Some(snapshot) = quota::parse_quota_headers(resp.headers()) {

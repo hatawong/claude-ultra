@@ -944,7 +944,17 @@
             "auto_sync_desc": "Escribir variables de entorno directamente en ~/.claude/settings.json (preserva configuración existente)",
             "synced": "Sincronizado",
             "sync_now": "Sincronizar Ahora",
-            "lan_snippet": "Fragmento LAN settings.json"
+            "lan_snippet": "Fragmento LAN settings.json",
+            "transparent_snippet": "Fragmento env de settings.json para auditoría transparente",
+            "transparent_hint": "Sin ANTHROPIC_API_KEY: el modo transparente pasa las credenciales OAuth al upstream tal cual.",
+            "auto_sync_transparent": "Sincronización Automática al Modo Transparente",
+            "auto_sync_transparent_desc": "Cambiar CC CLI al puerto de auditoría transparente y eliminar ANTHROPIC_API_KEY (fallback OAuth).",
+            "confirm_transparent": "Cambiar CC CLI al puerto de auditoría transparente ({url}) y eliminar ANTHROPIC_API_KEY de ~/.claude/settings.json (el modo transparente requiere OAuth). ¿Continuar?",
+            "restore_title": "Restaurar configuración predeterminada",
+            "restore_desc": "Eliminar ANTHROPIC_BASE_URL y ANTHROPIC_API_KEY de ~/.claude/settings.json (CC CLI vuelve al upstream predeterminado).",
+            "restore_now": "Restaurar predeterminado",
+            "restored": "Restaurado",
+            "confirm_restore": "Eliminar ANTHROPIC_BASE_URL y ANTHROPIC_API_KEY de ~/.claude/settings.json. CC CLI volverá al upstream predeterminado con credenciales OAuth. Otros ajustes (telemetría / flags de caché) se conservan. ¿Continuar?"
         },
         "vercel": {
             "title": "Vercel AI Gateway",
