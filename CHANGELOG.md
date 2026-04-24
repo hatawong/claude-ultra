@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.4.119 — 2026-04-24
+
+### Bug Fixes
+
+- **Webapp dev path** — Fixed `webapp not found` error when building from source at a non-default clone path. Dev path now resolves relative to the crate root instead of `$HOME/claude-ultra/`.
+
 ## v1.3.119 — 2026-04-23
 
 ### Improvements
