@@ -772,20 +772,20 @@ pub fn get_webapp_command() -> (String, Vec<String>) {
         }
     }
 
-    // 2. Debug builds only: check local dev source tree relative to crate root
-    //    (CARGO_MANIFEST_DIR = crate dir; its parent = repo root; webapp/src/main.ts is a sibling)
+    // 2. Debug builds only: check local dev source tree relative to crate root.
+    //    CARGO_MANIFEST_DIR = crate dir. Try 1-level up (flat layout, e.g. public repo)
+    //    then 2-levels up (nested layout where crate sits under manager/src-tauri/).
     #[cfg(debug_assertions)]
     {
         let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let dev_path = crate_dir
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("webapp/src/main.ts");
-        if dev_path.exists() {
-            return (
-                bun.clone(),
-                vec!["run".to_string(), dev_path.to_string_lossy().to_string()],
-            );
+        for rel in ["../webapp/src/main.ts", "../../webapp/src/main.ts"] {
+            let dev_path = crate_dir.join(rel);
+            if dev_path.exists() {
+                return (
+                    bun.clone(),
+                    vec!["run".to_string(), dev_path.to_string_lossy().to_string()],
+                );
+            }
         }
     }
 
