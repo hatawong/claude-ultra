@@ -772,11 +772,15 @@ pub fn get_webapp_command() -> (String, Vec<String>) {
         }
     }
 
-    // 2. Debug builds only: check local dev source tree
+    // 2. Debug builds only: check local dev source tree relative to crate root
+    //    (CARGO_MANIFEST_DIR = crate dir; its parent = repo root; webapp/src/main.ts is a sibling)
     #[cfg(debug_assertions)]
     {
-        let home = dirs::home_dir().unwrap_or_default();
-        let dev_path = home.join("claude-ultra/webapp/src/main.ts");
+        let crate_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dev_path = crate_dir
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("webapp/src/main.ts");
         if dev_path.exists() {
             return (
                 bun.clone(),
