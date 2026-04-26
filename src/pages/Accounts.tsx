@@ -139,7 +139,11 @@ function Accounts() {
   const { refreshQuota, refreshingQuota } = useAccountStore();
   const [isRefreshConfirmOpen, setIsRefreshConfirmOpen] = useState(false);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
-  const { addingAccountId, setAddingAccountId } = useAccountStore();
+  const {
+    addingAccountId, setAddingAccountId,
+    addingStaticProxy, setAddingStaticProxy,
+    addingTestResult, setAddingTestResult,
+  } = useAccountStore();
 
   const handleRefreshSingle = useCallback(async (accountId: string) => {
     try {
@@ -471,7 +475,7 @@ function Accounts() {
 
         {/* Action buttons */}
         <div className="flex items-center gap-1.5 shrink-0">
-          {/* + Add (placeholder) */}
+          {/* + Add account button */}
           <button
             className="px-2.5 py-2 bg-gray-700 dark:bg-base-200 text-white dark:text-gray-300 text-xs font-medium rounded-lg hover:bg-gray-800 dark:hover:bg-base-100 transition-colors flex items-center gap-1.5 shadow-sm"
             onClick={() => setIsAddDialogOpen(true)}
@@ -608,6 +612,10 @@ function Accounts() {
         <AddAccountDialog
           accountId={addingAccountId}
           onAccountIdChange={setAddingAccountId}
+          staticProxy={addingStaticProxy}
+          onStaticProxyChange={setAddingStaticProxy}
+          testResult={addingTestResult}
+          onTestResultChange={setAddingTestResult}
           onClose={() => setIsAddDialogOpen(false)}
           onToast={(msg: string) => showToast(msg)}
         />

@@ -341,7 +341,7 @@ function ActionBtn({ icon: Icon, title, onClick, hoverColor, active, spinning, u
   );
 }
 
-type RouteType = 'proxy' | 'vercel' | 'direct';
+type RouteType = 'proxy' | 'static' | 'vercel' | 'direct';
 
 function RouteLabel({ account }: { account: Account }) {
   const config = useConfigStore((s) => s.config);
@@ -349,25 +349,40 @@ function RouteLabel({ account }: { account: Account }) {
   const routeCountry = (account.routeCountry || account.country || account.region || 'us').toLowerCase();
   const proxyAvailable = !!config?.proxy?.residential?.username && !!config?.proxy?.residential?.password;
   const vercelAvailable = !!config?.gateway?.vercel_api_key;
+  const staticAvailable = !!account.staticProxy;
 
   let isFallback = false;
 
-  // Mirror of gateway/route.rs::resolve_route() — keep in sync
+  // Mirror of gateway/route.rs::resolve_route() — keep in sync.
+  // Three-way symmetric fallback: paid/configured (Static, Vercel) take
+  // priority over the dynamic Proxy pool, with Direct as last resort.
   const resolve = (): RouteType => {
-    if (!proxyAvailable && !vercelAvailable) { isFallback = mode !== 'direct'; return 'direct'; }
+    if (!proxyAvailable && !vercelAvailable && !staticAvailable) {
+      isFallback = mode !== 'direct';
+      return 'direct';
+    }
     if (mode === 'proxy') {
       if (proxyAvailable) return 'proxy';
+      if (staticAvailable) { isFallback = true; return 'static'; }
       if (vercelAvailable) { isFallback = true; return 'vercel'; }
+      isFallback = true; return 'direct';
+    }
+    if (mode === 'static') {
+      if (staticAvailable) return 'static';
+      if (vercelAvailable) { isFallback = true; return 'vercel'; }
+      if (proxyAvailable) { isFallback = true; return 'proxy'; }
       isFallback = true; return 'direct';
     }
     if (mode === 'vercel') {
       if (vercelAvailable) return 'vercel';
+      if (staticAvailable) { isFallback = true; return 'static'; }
       if (proxyAvailable) { isFallback = true; return 'proxy'; }
       isFallback = true; return 'direct';
     }
     if (mode === 'direct') return 'direct';
     // unknown mode → proxy chain
     if (proxyAvailable) { isFallback = true; return 'proxy'; }
+    if (staticAvailable) { isFallback = true; return 'static'; }
     if (vercelAvailable) { isFallback = true; return 'vercel'; }
     isFallback = true; return 'direct';
   };
@@ -375,9 +390,11 @@ function RouteLabel({ account }: { account: Account }) {
 
   const label = routeType === 'proxy'
     ? `Proxy/${routeCountry.toUpperCase()}`
-    : routeType === 'vercel'
-      ? 'Vercel'
-      : 'Direct';
+    : routeType === 'static'
+      ? `Static/${(account.staticProxy?.protocol || 'socks5').toUpperCase()}`
+      : routeType === 'vercel'
+        ? 'Vercel'
+        : 'Direct';
 
   return (
     <RouteTooltip account={account} routeType={routeType} isFallback={isFallback} mode={mode}>
@@ -385,6 +402,7 @@ function RouteLabel({ account }: { account: Account }) {
         ? <span className="inline-flex items-center justify-center w-4 h-4 text-[10px] leading-none">⚠️</span>
         : routeType === 'proxy' && account.proxy ? <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-green-500" /></span>
         : routeType === 'proxy' ? <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-gray-300 dark:bg-gray-600" /></span>
+        : routeType === 'static' ? <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-green-500" /></span>
         : routeType === 'vercel' ? <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-blue-500" /></span>
         : <span className="inline-flex items-center justify-center w-4 h-4"><span className="inline-block w-2 h-2 rounded-full bg-yellow-500" /></span>
       }
@@ -423,6 +441,18 @@ function RouteTooltip({ account, routeType, isFallback, mode, children }: {
     }
     tooltipRows.push(['Session', account.proxy.sessionId || '\u2014']);
     tooltipRows.push(['Quality', account.proxy.quality || '\u2014']);
+  } else if (routeType === 'static') {
+    if (account.proxy) {
+      tooltipRows.push(['IP', account.proxy.lastIp || '\u2014']);
+      tooltipRows.push(['Country', account.proxy.country || '\u2014']);
+      if (account.proxy.isp) tooltipRows.push(['ISP', account.proxy.isp]);
+      if (account.proxy.region || account.proxy.city) {
+        tooltipRows.push(['Region', [account.proxy.region, account.proxy.city].filter(Boolean).join(' \u00b7 ')]);
+      }
+      tooltipRows.push(['Quality', account.proxy.quality || '\u2014']);
+    } else if (account.staticProxy) {
+      tooltipRows.push(['Status', 'Not tested']);
+    }
   } else if (routeType === 'vercel') {
     tooltipRows.push(['Provider', 'Vercel AI Gateway']);
     tooltipRows.push(['Mode', 'BYOK (subscription proxy)']);

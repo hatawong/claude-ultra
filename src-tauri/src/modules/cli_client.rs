@@ -599,8 +599,8 @@ mod tests {
         };
 
         let body = serde_json::json!({
-            "access_token": "sk-ant-oat01-new",
-            "refresh_token": "sk-ant-ort01-new",
+            "access_token": "stub-oat01-new",
+            "refresh_token": "stub-ort01-new",
             "expires_in": 28800,
             "token_type": "Bearer",
             "subscription_type": "max",
@@ -611,8 +611,8 @@ mod tests {
         let result = client
             .parse_token_response(serde_json::to_vec(&body).unwrap().as_slice())
             .unwrap();
-        assert_eq!(result.access_token, "sk-ant-oat01-new");
-        assert_eq!(result.refresh_token, "sk-ant-ort01-new");
+        assert_eq!(result.access_token, "stub-oat01-new");
+        assert_eq!(result.refresh_token, "stub-ort01-new");
         assert_eq!(result.expires_in, 28800);
         assert_eq!(result.subscription_type.as_deref(), Some("max"));
         assert_eq!(
@@ -639,7 +639,7 @@ mod tests {
 
         // refresh_token absent in response → keep existing
         let body = serde_json::json!({
-            "access_token": "sk-ant-oat01-new",
+            "access_token": "stub-oat01-new",
             "expires_in": 3600,
         });
 
@@ -779,7 +779,7 @@ mod tests {
     fn test_axios_headers_get_has_authorization() {
         let client = CliClient {
             client: Arc::new(BoringClient::builder().build().unwrap()),
-            access_token: "sk-ant-oat01-test".to_string(),
+            access_token: "stub-oat01-test".to_string(),
             refresh_token: String::new(),
             expires_at: 0,
             proxy_url: None,
@@ -793,7 +793,7 @@ mod tests {
         let headers = client.build_axios_headers_get();
         assert_eq!(
             headers.get("authorization").unwrap(),
-            "Bearer sk-ant-oat01-test"
+            "Bearer stub-oat01-test"
         );
     }
 

@@ -293,8 +293,8 @@ mod tests {
 
     #[test]
     fn test_lan_ip_to_slash_24_non_rfc1918_rejected() {
-        // Regression test for v1.0.1 P2-D followup: must NOT expand to /24 for
-        // non-private IPs, which would over-whitelist overlay / CGNAT / public neighbors.
+        // Regression guard: must NOT expand to /24 for non-private IPs,
+        // which would over-whitelist overlay / CGNAT / public neighbors.
 
         // CGNAT / Tailscale / Zerotier — neighbors are OTHER users
         assert_eq!(lan_ip_to_slash_24("100.64.0.1"), None);

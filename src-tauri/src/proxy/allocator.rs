@@ -94,17 +94,9 @@ impl ProxyAllocator {
         id[..12].to_string()
     }
 
-    /// Build the proxy URL for IPRoyal.
+    /// Build proxy URL using default_country. Forwards to build_proxy_url_with_country.
     pub fn build_proxy_url(&self, session_id: &str) -> String {
-        format!(
-            "http://{}:{}_country-{}_session-{}_lifetime-24h_streaming-1@{}:{}",
-            self.provider_config.username,
-            self.provider_config.password,
-            self.provider_config.default_country.to_lowercase(),
-            session_id,
-            self.provider_config.host,
-            self.provider_config.port
-        )
+        self.build_proxy_url_with_country(session_id, &self.provider_config.default_country)
     }
 
     /// Inject ProxyPool (called once at app startup).
@@ -117,9 +109,21 @@ impl ProxyAllocator {
         self.pool.get()
     }
 
-    /// Get proxy_url (Direct mode safe).
-    /// Empty credentials → returns Ok(None) (direct connection). Valid credentials → returns Ok(Some(url)).
+    /// Get proxy_url for an account.
+    ///
+    /// - Empty global proxy credentials AND no per-account static_proxy → Ok(None) (direct).
+    /// - route_mode == "static" + static_proxy configured → Ok(Some(static_url)) (socks5/http).
+    /// - route_mode == "static" + static_proxy missing → Err (caller surfaces config error).
+    /// - Otherwise → routes through ProxyPool dynamic allocation (Some(rotated_url)).
     pub async fn get_proxy_url_optional(self: &Arc<Self>, account_id: &str) -> Result<Option<String>, String> {
+        let account = self.account_manager.read(account_id).await
+            .map_err(|e| format!("read account {}: {}", account_id, e))?;
+        if account.route_mode == "static" {
+            let sp = account.static_proxy.as_ref().ok_or_else(|| {
+                format!("account {} route_mode=static but static_proxy=None", account_id)
+            })?;
+            return Ok(Some(build_static_proxy_url(sp)));
+        }
         if self.provider_config.username.is_empty() || self.provider_config.password.is_empty() {
             return Ok(None);
         }
@@ -426,17 +430,13 @@ impl ProxyAllocator {
         self.build_proxy_url(&session_id)
     }
 
-    /// Build proxy URL with explicit country (not using default_country).
+    /// Build proxy URL with explicit country. Forwards to the shared
+    /// `build_residential_proxy_url` helper — that function is the single
+    /// source of truth for residential URL formatting; every caller (this
+    /// allocator, the test_proxy_connection IPC, e2e fixtures) must go
+    /// through it so test paths and production paths cannot drift.
     pub fn build_proxy_url_with_country(&self, session_id: &str, country: &str) -> String {
-        format!(
-            "http://{}:{}_country-{}_session-{}_lifetime-24h_streaming-1@{}:{}",
-            self.provider_config.username,
-            self.provider_config.password,
-            country.to_lowercase(),
-            session_id,
-            self.provider_config.host,
-            self.provider_config.port
-        )
+        build_residential_proxy_url(&self.provider_config, country, session_id)
     }
 
     /// Allocate a new proxy session WITHOUT persisting to Account JSON.
@@ -569,6 +569,98 @@ impl ProxyAllocator {
 
 }
 
+/// Build a residential dynamic proxy URL from a `ProxyProviderConfig`.
+///
+/// Single source of truth for residential URL formatting. Every caller
+/// (ProxyAllocator hot path, the `test_proxy_connection` UI probe, e2e
+/// fixtures) MUST go through this function so the test path and the
+/// production path cannot drift.
+///
+/// Provider dispatch:
+/// - **IPRoyal** (default / unknown kind): `_country/_session/_lifetime/_streaming-1`
+///   appended to the password segment, lowercase country. `_streaming-1` is the
+///   High-End Pool flag — manager talks to the High-End pool; webapp's shared
+///   builder talks to the Standard pool and intentionally omits it (accepted
+///   asymmetry, kept here so no caller silently drops the flag).
+/// - **IPFoxy**: parameters are placed in the username segment with hyphen
+///   separators, uppercase country. The username is forwarded verbatim —
+///   no prefix injection, no normalisation; whatever the user pasted into
+///   the proxy config is exactly what reaches the upstream.
+///
+/// Character-level aligned with `shared/src/proxy.ts::buildResidentialUrl`
+/// (excluding `_streaming-1`, see above). Any format change must be applied
+/// in both files; the unit tests here lock the expected strings.
+pub fn build_residential_proxy_url(
+    cfg: &crate::proxy::config::ProxyProviderConfig,
+    country: &str,
+    session_id: &str,
+) -> String {
+    match cfg.kind.as_str() {
+        "ipfoxy" => format!(
+            "http://{}-cc-{}-sessid-{}:{}@{}:{}",
+            cfg.username,
+            country.to_uppercase(),
+            session_id,
+            cfg.password,
+            cfg.host,
+            cfg.port,
+        ),
+        // IPRoyal (default) or unknown kind. Backward-compat fallback so
+        // legacy configs without an explicit kind still route correctly.
+        _ => format!(
+            "http://{}:{}_country-{}_session-{}_lifetime-24h_streaming-1@{}:{}",
+            cfg.username,
+            cfg.password,
+            country.to_lowercase(),
+            session_id,
+            cfg.host,
+            cfg.port,
+        ),
+    }
+}
+
+/// Build a standard proxy URL from a per-account `StaticProxy` config.
+/// Format: `<protocol>://<user>:<pass>@<host>:<port>` with credentials
+/// percent-encoded so the SOCKS5 USER/PASS sub-negotiation parser sees the
+/// raw bytes back after decoding.
+pub(crate) fn build_static_proxy_url(sp: &crate::models::account::StaticProxy) -> String {
+    let user = percent_encode_alnum(&sp.username);
+    let pass = percent_encode_alnum(&sp.password);
+    let host = format_host(&sp.host);
+    format!("{}://{}:{}@{}:{}", sp.protocol, user, pass, host, sp.port)
+}
+
+/// IPv6 literals must be wrapped in `[]` per RFC 3986 so the URL parser
+/// distinguishes them from `host:port` colon. IPv4 + DNS hostnames pass
+/// through unchanged. Hosts with characters outside the expected set are
+/// passed through too — the UI is expected to validate format at config time.
+fn format_host(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{}]", host)
+    } else {
+        host.to_string()
+    }
+}
+
+/// Percent-encode for SOCKS5/HTTP proxy URL credentials.
+///
+/// Only `A-Za-z0-9` pass through unencoded; all other bytes are %XX-escaped.
+/// Stricter than JS `encodeURIComponent` (which preserves `-_.!~*'()`), but
+/// IPFoxy credentials in production are alphanumeric so the two outputs are
+/// identical for real inputs. Stricter encoding is safer for round-trip
+/// through the SOCKS5 USER/PASS sub-negotiation parser.
+fn percent_encode_alnum(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{:02X}", b));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,6 +689,7 @@ mod tests {
 
     fn make_provider_config() -> ProxyProviderConfig {
         ProxyProviderConfig {
+            kind: "iproyal".to_string(),
             host: "127.0.0.99".to_string(),  // unreachable proxy for tests
             port: 19999,
             username: "testuser".to_string(),
@@ -609,6 +702,39 @@ mod tests {
     fn write_account(dir: &std::path::Path, id: &str) {
         let json = format!(
             r#"{{"accountId":"{}","email":"{}@t.com","cli":{{"accessToken":"t","refreshToken":"r","expiresAt":0}}}}"#,
+            id, id
+        );
+        std::fs::write(dir.join(format!("{}.json", id)), json).unwrap();
+    }
+
+    fn write_account_static(dir: &std::path::Path, id: &str) {
+        let json = format!(
+            r#"{{"accountId":"{}","email":"{}@t.com","routeMode":"static","staticProxy":{{"protocol":"socks5","host":"203.0.113.10","port":45001,"username":"u","password":"p"}},"cli":{{"accessToken":"t","refreshToken":"r","expiresAt":0}}}}"#,
+            id, id
+        );
+        std::fs::write(dir.join(format!("{}.json", id)), json).unwrap();
+    }
+
+    fn write_account_static_http(dir: &std::path::Path, id: &str) {
+        let json = format!(
+            r#"{{"accountId":"{}","email":"{}@t.com","routeMode":"static","staticProxy":{{"protocol":"http","host":"h.example","port":8080,"username":"u","password":"p"}},"cli":{{"accessToken":"t","refreshToken":"r","expiresAt":0}}}}"#,
+            id, id
+        );
+        std::fs::write(dir.join(format!("{}.json", id)), json).unwrap();
+    }
+
+    fn write_account_static_special_chars(dir: &std::path::Path, id: &str) {
+        let json = format!(
+            r#"{{"accountId":"{}","email":"{}@t.com","routeMode":"static","staticProxy":{{"protocol":"socks5","host":"h","port":1080,"username":"us@er","password":"p:ss"}},"cli":{{"accessToken":"t","refreshToken":"r","expiresAt":0}}}}"#,
+            id, id
+        );
+        std::fs::write(dir.join(format!("{}.json", id)), json).unwrap();
+    }
+
+    fn write_account_static_no_creds(dir: &std::path::Path, id: &str) {
+        // routeMode=static but no staticProxy field — misconfiguration test fixture.
+        let json = format!(
+            r#"{{"accountId":"{}","email":"{}@t.com","routeMode":"static","cli":{{"accessToken":"t","refreshToken":"r","expiresAt":0}}}}"#,
             id, id
         );
         std::fs::write(dir.join(format!("{}.json", id)), json).unwrap();
@@ -680,6 +806,103 @@ mod tests {
             result.unwrap_err().contains("Failed to allocate"),
             "should report allocation failure"
         );
+    }
+
+    // ── Static account dispatch ──────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_proxy_url_optional_static_returns_socks5_url() {
+        // route_mode=static + staticProxy{socks5} → returns the standard
+        // socks5:// URL with credentials inline.
+        let dir = TestDir::new();
+        write_account_static(&dir.path, "static_socks5");
+        let allocator = Arc::new(make_allocator(&dir.path));
+
+        let result = allocator.get_proxy_url_optional("static_socks5").await;
+        assert_eq!(result, Ok(Some("socks5://u:p@203.0.113.10:45001".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_get_proxy_url_optional_static_returns_http_url() {
+        let dir = TestDir::new();
+        write_account_static_http(&dir.path, "static_http");
+        let allocator = Arc::new(make_allocator(&dir.path));
+
+        let result = allocator.get_proxy_url_optional("static_http").await;
+        assert_eq!(result, Ok(Some("http://u:p@h.example:8080".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_get_proxy_url_optional_static_url_encodes_creds() {
+        // user='us@er' pass='p:ss' → percent-encoded
+        let dir = TestDir::new();
+        write_account_static_special_chars(&dir.path, "static_special");
+        let allocator = Arc::new(make_allocator(&dir.path));
+
+        let result = allocator.get_proxy_url_optional("static_special").await;
+        assert_eq!(result, Ok(Some("socks5://us%40er:p%3Ass@h:1080".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_get_proxy_url_optional_static_no_creds_returns_err() {
+        // routeMode=static but staticProxy=None → Err so the caller surfaces
+        // a config error rather than silently falling through.
+        let dir = TestDir::new();
+        write_account_static_no_creds(&dir.path, "static_misconfig");
+        let allocator = Arc::new(make_allocator(&dir.path));
+
+        let result = allocator.get_proxy_url_optional("static_misconfig").await;
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+    }
+
+    #[test]
+    fn test_format_host_ipv4_passthrough() {
+        assert_eq!(format_host("203.0.113.10"), "203.0.113.10");
+    }
+
+    #[test]
+    fn test_format_host_dns_passthrough() {
+        assert_eq!(format_host("gate.ipfoxy.io"), "gate.ipfoxy.io");
+    }
+
+    #[test]
+    fn test_format_host_ipv6_wrapped() {
+        // IPv6 literals must be wrapped in `[]` so the URL parser does not
+        // mistake the address colons for the host:port separator.
+        assert_eq!(format_host("::1"), "[::1]");
+        assert_eq!(format_host("2001:db8::1"), "[2001:db8::1]");
+    }
+
+    #[test]
+    fn test_format_host_ipv6_already_wrapped_passthrough() {
+        // Already-wrapped IPv6 (e.g. user pasted `[::1]`) must not be
+        // double-wrapped.
+        assert_eq!(format_host("[::1]"), "[::1]");
+    }
+
+    #[test]
+    fn test_build_static_proxy_url_ipv6() {
+        let sp = crate::models::account::StaticProxy {
+            protocol: "socks5".to_string(),
+            host: "::1".to_string(),
+            port: 1080,
+            username: "u".to_string(),
+            password: "p".to_string(),
+        };
+        assert_eq!(build_static_proxy_url(&sp), "socks5://u:p@[::1]:1080");
+    }
+
+    #[tokio::test]
+    async fn test_get_proxy_url_optional_dynamic_routes_through_pool() {
+        // route_mode=proxy (default) + valid creds → does NOT short-circuit.
+        // The call hits get_active_proxy_url and (with no real ProxyPool
+        // injected here) falls through to the ephemeral URL, returning Some.
+        let dir = TestDir::new();
+        write_account(&dir.path, "dyn_acct");
+        let allocator = Arc::new(make_allocator(&dir.path));
+
+        let result = allocator.get_proxy_url_optional("dyn_acct").await;
+        assert!(matches!(result, Ok(Some(_))), "got {:?}", result);
     }
 
     // ── Renew concurrent protection ──────────────────────────
@@ -785,6 +1008,115 @@ mod tests {
         assert!(url.contains("country-jp"), "should use explicit country: {}", url);
         assert!(url.contains("session-a1b2c3d4e5f6"));
         assert!(url.contains("testuser"));
+    }
+
+    #[test]
+    fn test_build_proxy_url_iproyal_format() {
+        // Golden vector: IPRoyal format aligned with current Rust impl
+        let dir = TestDir::new();
+        let mgr = Arc::new(AccountManager::new(dir.path.clone()));
+        let mut cfg = make_provider_config();
+        cfg.kind = "iproyal".to_string();
+        cfg.host = "geo.iproyal.com".to_string();
+        cfg.port = 12321;
+        cfg.default_country = "us".to_string();
+        let allocator = ProxyAllocator::new(mgr, Arc::new(cfg));
+
+        let url = allocator.build_proxy_url("a1b2c3d4e5f6");
+        assert_eq!(
+            url,
+            "http://testuser:testpass_country-us_session-a1b2c3d4e5f6_lifetime-24h_streaming-1@geo.iproyal.com:12321"
+        );
+    }
+
+    #[test]
+    fn test_build_proxy_url_ipfoxy_format() {
+        // Golden vector: IPFoxy format character-level aligned with shared/src/proxy.ts buildResidentialUrl
+        let dir = TestDir::new();
+        let mgr = Arc::new(AccountManager::new(dir.path.clone()));
+        let mut cfg = make_provider_config();
+        cfg.kind = "ipfoxy".to_string();
+        cfg.host = "gate.ipfoxy.io".to_string();
+        cfg.port = 58688;
+        cfg.default_country = "us".to_string();
+        let allocator = ProxyAllocator::new(mgr, Arc::new(cfg));
+
+        let url = allocator.build_proxy_url("a1b2c3d4e5f6");
+        assert_eq!(
+            url,
+            "http://testuser-cc-US-sessid-a1b2c3d4e5f6:testpass@gate.ipfoxy.io:58688"
+        );
+    }
+
+    #[test]
+    fn test_build_proxy_url_unknown_kind_fallback_to_iproyal() {
+        // Unknown kind falls back to IPRoyal format (backward compat).
+        let dir = TestDir::new();
+        let mgr = Arc::new(AccountManager::new(dir.path.clone()));
+        let mut cfg = make_provider_config();
+        cfg.kind = "unknown".to_string();
+        cfg.host = "geo.iproyal.com".to_string();
+        cfg.port = 12321;
+        cfg.default_country = "us".to_string();
+        let allocator = ProxyAllocator::new(mgr, Arc::new(cfg));
+
+        let url = allocator.build_proxy_url("a1b2c3d4e5f6");
+        assert_eq!(
+            url,
+            "http://testuser:testpass_country-us_session-a1b2c3d4e5f6_lifetime-24h_streaming-1@geo.iproyal.com:12321"
+        );
+    }
+
+    #[test]
+    fn test_build_proxy_url_ipfoxy_with_country_override_uppercase() {
+        // IPFoxy with explicit country (lowercase input) → uppercase in URL (-cc-XX-).
+        // Pin the country.to_uppercase() invariant explicitly.
+        let dir = TestDir::new();
+        let mgr = Arc::new(AccountManager::new(dir.path.clone()));
+        let mut cfg = make_provider_config();
+        cfg.kind = "ipfoxy".to_string();
+        cfg.host = "gate.ipfoxy.io".to_string();
+        cfg.port = 58688;
+        cfg.default_country = "us".to_string();
+        let allocator = ProxyAllocator::new(mgr, Arc::new(cfg));
+
+        let url = allocator.build_proxy_url_with_country("a1b2c3d4e5f6", "jp");
+        assert_eq!(
+            url,
+            "http://testuser-cc-JP-sessid-a1b2c3d4e5f6:testpass@gate.ipfoxy.io:58688"
+        );
+    }
+
+    #[test]
+    fn test_build_residential_proxy_url_ipfoxy_username_passes_through_verbatim_with_dashes() {
+        // Builder must not normalise the username. Whatever the user
+        // pasted (including embedded dashes) reaches the upstream URL.
+        let mut cfg = make_provider_config();
+        cfg.kind = "ipfoxy".to_string();
+        cfg.username = "alpha-bravo".to_string();
+        cfg.password = "secret".to_string();
+        cfg.host = "gate.ipfoxy.io".to_string();
+        cfg.port = 58688;
+        let url = build_residential_proxy_url(&cfg, "us", "a1b2c3d4e5f6");
+        assert_eq!(
+            url,
+            "http://alpha-bravo-cc-US-sessid-a1b2c3d4e5f6:secret@gate.ipfoxy.io:58688"
+        );
+    }
+
+    #[test]
+    fn test_build_residential_proxy_url_ipfoxy_username_passes_through_verbatim_alphanumeric() {
+        let mut cfg = make_provider_config();
+        cfg.kind = "ipfoxy".to_string();
+        cfg.username = "user42abc".to_string();
+        cfg.password = "secret".to_string();
+        cfg.host = "gate.ipfoxy.io".to_string();
+        cfg.port = 58688;
+        let url = build_residential_proxy_url(&cfg, "us", "a1b2c3d4e5f6");
+        assert_eq!(
+            url,
+            "http://user42abc-cc-US-sessid-a1b2c3d4e5f6:secret@gate.ipfoxy.io:58688"
+        );
     }
 
     // ── IpInfo struct ────────────────────────────────────────

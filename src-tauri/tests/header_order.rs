@@ -52,7 +52,7 @@ async fn test_outbound_header_order_on_wire() {
     let account = RequestContext {
         device_id: "abcd".repeat(16),
         account_uuid: "uuid-test".to_string(),
-        access_token: "sk-ant-oat01-test".to_string(),
+        access_token: "stub-oat01-test".to_string(),
         mapped_session_uuid: "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb".to_string(),
     };
 

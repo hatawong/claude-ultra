@@ -12,11 +12,19 @@
   },
   "proxy": {
     "default_type": "residential",
+    "default_country": "us",
     "residential": {
+      "kind": "iproyal",
       "host": "geo.iproyal.com",
       "port": 12321,
       "username": "",
       "password": ""
+    }
+  },
+  "android": {
+    "appVersion": "1.260402.20",
+    "conscrypt": {
+      "url": "http://127.0.0.1:3456"
     }
   }
 }

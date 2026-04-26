@@ -164,6 +164,13 @@ impl BoringClient {
         target_host: &str,
         target_port: u16,
     ) -> Result<(SendRequest<Full<Bytes>>, tokio::task::JoinHandle<()>, ConnectTimings), Error> {
+        // SOCKS5 connector requires additional dependencies not enabled here.
+        // Surface a clear error so operators see "socks5 not supported in this build"
+        // instead of a misleading CONNECT failure.
+        if proxy_url.starts_with("socks5://") || proxy_url.starts_with("socks5h://") {
+            return Err(Error::tunnel("socks5 not supported in this build").with_step(ConnectStep::Tunnel));
+        }
+
         let proxy_uri: http::Uri = proxy_url
             .parse()
             .map_err(|e| Error::connect(format!("Invalid proxy URL: {}", e)))?;

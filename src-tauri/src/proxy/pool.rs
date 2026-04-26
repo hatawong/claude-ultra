@@ -859,7 +859,7 @@ impl ProxyPool {
                 };
                 state.failure_streak = 0;
 
-                // P1-2: verify session wasn't switched during probe
+                // verify session wasn't switched during probe
                 let current_session_id = state.active.session.session_id.clone();
                 if current_session_id == active_session_id {
                     let total = state.active.idle_conns.len() + state.active.checked_out;
@@ -893,7 +893,7 @@ impl ProxyPool {
         {
             let mut state = arc.lock().await;
 
-            // Collect session_ids to remove first (P2-1: don't delete by index during forward iteration)
+            // Collect session_ids to remove first (don't delete by index during forward iteration)
             let mut remove_ids: Vec<String> = Vec::new();
 
             for (slot_idx, url_opt) in standby_urls.iter().enumerate() {
@@ -1063,7 +1063,7 @@ impl ProxyPool {
             return;
         }
 
-        // Locate by session_id precisely (P1-1: standby may change during await window)
+        // Locate by session_id precisely (standby may change during await window)
         let mut state = arc.lock().await;
         let idx = state.standby.iter().position(|s| s.session.session_id == best_session_id);
         match idx {
@@ -1304,7 +1304,7 @@ impl ProxyRequestBuilder {
                 }).await {
                     tracing::error!("[POOL] release channel send failed: {}", send_err);
                 }
-                // Trigger standby switch (P2-4: per design doc)
+                // Trigger standby switch on connection failure
                 self.pool.try_switch_to_standby(&self.account_id).await;
                 Err(ProxyError::ConnectionFailed(format!("send_on_sender: {}", e)))
             }
@@ -1471,6 +1471,7 @@ mod tests {
 
     fn make_provider_config() -> ProxyProviderConfig {
         ProxyProviderConfig {
+            kind: "iproyal".to_string(),
             host: "127.0.0.99".to_string(),
             port: 19999,
             username: "testuser".to_string(),

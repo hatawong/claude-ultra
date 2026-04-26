@@ -260,6 +260,7 @@ mod tests {
 
     fn make_provider_config() -> ProxyProviderConfig {
         ProxyProviderConfig {
+            kind: "iproyal".to_string(),
             host: "127.0.0.99".to_string(),
             port: 19999,
             username: "testuser".to_string(),

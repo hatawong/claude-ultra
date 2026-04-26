@@ -387,6 +387,7 @@ async fn gateway_request(
                     &route_mode,
                     &proxy_country,
                     state.has_proxy,
+                    state.client_manager.has_static_proxy(&account_id),
                     !state.vercel_api_key.is_empty(),
                 )
             };
@@ -470,6 +471,55 @@ async fn gateway_request(
                         Err(e) => {
                             tracing::error!("[FAIL] account={} proxy error: {}", account_id, e);
                             last_error_recoverable = false;
+                            break 'middle true;
+                        }
+                    }
+                }
+                ActualRoute::Static => {
+                    // Static routes follow the Vercel/Direct shape: dispatch
+                    // directly through `state.client` with `.proxy(static_url)`,
+                    // bypassing ProxyPool (which is designed for dynamic
+                    // sessid rotation and would only complicate the 1:1 IP
+                    // binding). The static IP is verified at config time
+                    // (UI form's verify_ip), so runtime failures are surfaced
+                    // to the user as 502 — no retry, no fallback to the
+                    // dynamic pool, no IP profile pollution.
+                    let static_url = state.client_manager.get_static_proxy_url(&account_id);
+                    let static_url = match static_url {
+                        Some(u) => u,
+                        None => {
+                            tracing::error!(
+                                "[FAIL] account={} routeMode=static but static_proxy_url cache miss",
+                                account_id
+                            );
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                "Static proxy not configured. Check staticProxy settings.".to_string(),
+                            ).into_response();
+                        }
+                    };
+                    let static_req = state.client
+                        .post(&url)
+                        .headers(final_headers.clone())
+                        .body(Bytes::from(modified_body.clone()))
+                        .cc_cli_version(&prepared.version, cch_offset)
+                        .proxy(&static_url);
+                    match static_req.send().await {
+                        Ok(static_resp) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::info!(
+                                "[RESP] account={} status={} send_ms={} (static)",
+                                account_id, static_resp.status().as_u16(), send_elapsed.as_millis()
+                            );
+                            static_resp.map(|body| axum::body::Body::new(body))
+                        }
+                        Err(e) => {
+                            let send_elapsed = send_start.elapsed();
+                            tracing::warn!(
+                                "[FAIL] account={} static proxy failed: {} send_ms={}",
+                                account_id, e, send_elapsed.as_millis()
+                            );
+                            last_error_recoverable = e.is_retryable();
                             break 'middle true;
                         }
                     }

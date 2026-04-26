@@ -97,7 +97,7 @@ export default function AccountWebLoginDialog({ account, onClose }: AccountWebLo
                 )}
               </div>
               <div className="flex items-center gap-1.5">
-                {(task.status === 'running' || task.status === 'paused') && !task.hasResult && (
+                {(task.status === 'running' || task.status === 'paused') && (
                   <>
                     <button
                       onClick={task.handlePauseResume}

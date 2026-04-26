@@ -1,21 +1,33 @@
 /**
- * AddAccountDialog — Add account dialog
+ * AddAccountDialog — Add account dialog.
  *
- * Simplified flow: create shell Account -> start Web Login -> on success write cookies -> account appears in list
- * Supports Google Auth / Email or any login method (user operates in browser).
+ * Simplified flow: create shell Account -> start Web Login -> on success
+ * write cookies -> account appears in list. Supports Google Auth / Email /
+ * any login method (user operates in browser).
+ *
+ * Static proxy entry: Header Static Badge opens a child dialog that hosts
+ * StaticProxyEditPanel (mode='add'). Test calls dryrun IPC (no disk write);
+ * Save captures sp + ProxySection snapshot in parent state and forwards
+ * both to add_account_and_login at submit time for atomic write.
  */
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, Play, Square, Pause, Trash2, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
+import type { StaticProxy } from '../../types/account';
+import StaticProxyEditPanel from './StaticProxyEditPanel';
+import type { ProxyTestResult } from '../../types/account';
 import { cn } from '../../utils/cn';
 import { useTaskDialog } from '../../hooks/useTaskDialog';
 import { useWebappPreflight } from '../../hooks/useWebappPreflight';
 
-
 interface AddAccountDialogProps {
   accountId: string | null;
   onAccountIdChange: (id: string | null) => void;
+  staticProxy: StaticProxy | null;
+  onStaticProxyChange: (sp: StaticProxy | null) => void;
+  testResult: ProxyTestResult | null;
+  onTestResultChange: (tr: ProxyTestResult | null) => void;
   onClose: () => void;
   onToast?: (msg: string) => void;
 }
@@ -25,15 +37,18 @@ interface AddAccountResult {
   taskId: string;
 }
 
-export default function AddAccountDialog({ accountId, onAccountIdChange, onClose, onToast }: AddAccountDialogProps) {
+export default function AddAccountDialog({
+  accountId, onAccountIdChange, staticProxy, onStaticProxyChange,
+  testResult, onTestResultChange, onClose, onToast,
+}: AddAccountDialogProps) {
   const { t } = useTranslation();
   const setAccountId = onAccountIdChange;
-  // web-add is a singleton task (one AddAccount operation globally at a time).
   const taskId = 'web-add';
 
-  // Writes handled by Rust subprocess.rs directly to AccountManager.
-  // Dialog is display-only; toast shown on task.status === 'done'.
   const task = useTaskDialog({ taskId });
+
+  const [showStaticEditDialog, setShowStaticEditDialog] = useState(false);
+  const badgeDisabled = task.status === 'running' || task.status === 'paused';
 
   const toastShownRef = useRef(false);
   useEffect(() => {
@@ -50,28 +65,37 @@ export default function AddAccountDialog({ accountId, onAccountIdChange, onClose
   const preflight = useWebappPreflight(showStartBtn);
 
   const handleStart = useCallback(async () => {
-    // On retry, reuse existing accountId; both paths use add_account_and_login → web-add- taskId
+    const probedProxy = testResult?.ok ? testResult.proxySection ?? null : null;
+    const routeMode = staticProxy ? 'static' : undefined;
     if (accountId) {
       await task.resetForNewRun();
       try {
-        await invoke<AddAccountResult>('add_account_and_login', { accountId });
+        await invoke<AddAccountResult>('add_account_and_login', {
+          accountId, routeMode, staticProxy, probedProxy,
+        });
       } catch (e: any) {
         task.setError(String(e));
       }
       return;
     }
     try {
-      const result = await invoke<AddAccountResult>('add_account_and_login');
+      const result = await invoke<AddAccountResult>('add_account_and_login', {
+        routeMode, staticProxy, probedProxy,
+      });
       setAccountId(result.accountId);
     } catch (e: any) {
       task.setError(String(e));
     }
-  }, [accountId]);
+  }, [accountId, staticProxy, testResult]);
 
   const handleAddAnother = useCallback(() => {
     setAccountId(null);
-    // Don't call resetForNewRun (it sets running); next button click takes the first-time path in handleStart
-  }, []);
+    onStaticProxyChange(null);
+    onTestResultChange(null);
+    // Reset progress bar / log / status icon so the next attempt does not
+    // start with stale "✅ Done 100%" UI from the previous run.
+    task.resetToIdle();
+  }, [onStaticProxyChange, onTestResultChange, task]);
 
   const statusIcon = task.status === 'paused' ? '\u23f8' : {
     idle: '', running: '\ud83d\udfe2', done: '\u2705', failed: '\u274c', aborted: '\u26d4',
@@ -90,9 +114,38 @@ export default function AddAccountDialog({ accountId, onAccountIdChange, onClose
         {/* Header */}
         <div className="flex items-center justify-between px-6 pt-5 pb-3">
           <div>
-            <div className="text-sm font-semibold text-base-content">{t('accounts.add.title', 'Add Account')}</div>
-            <div className="text-xs text-gray-400 mt-1">
-              {t('accounts.add.web_login_hint', 'Login with any method (Google, Email, etc.) in the browser window.')}
+            <div className="text-sm font-semibold text-base-content">
+              {t('accounts.add.title', 'Add Account')}
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-xs text-gray-400">
+                {t('accounts.add.web_login_hint', 'Login with any method (Google, Email, etc.) in the browser window')}
+              </span>
+              <button
+                type="button"
+                disabled={badgeDisabled}
+                onClick={() => setShowStaticEditDialog(true)}
+                title={
+                  badgeDisabled
+                    ? t('accounts.add.static_badge_disabled', 'Cannot edit while task is running')
+                    : staticProxy
+                      ? t('accounts.add.static_badge_set', 'Static proxy configured (click to edit)')
+                      : t('accounts.add.static_badge_unset', 'Click to configure static proxy')
+                }
+                className={cn(
+                  'inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold transition-colors',
+                  staticProxy
+                    ? 'bg-green-500/20 text-green-400'
+                    : 'bg-gray-500/20 text-gray-400',
+                  badgeDisabled
+                    ? 'cursor-not-allowed opacity-50'
+                    : staticProxy
+                      ? 'cursor-pointer hover:bg-green-500/40 hover:text-green-300'
+                      : 'cursor-pointer hover:bg-gray-500/40 hover:text-gray-200',
+                )}
+              >
+                {staticProxy ? `Static/${staticProxy.protocol.toUpperCase()}` : 'Static'}
+              </button>
             </div>
           </div>
           <button onClick={onClose} className="p-1.5 rounded-md text-gray-400 hover:text-gray-300 hover:bg-base-200 transition-colors">
@@ -124,7 +177,7 @@ export default function AddAccountDialog({ accountId, onAccountIdChange, onClose
                 {task.error && <span className="text-xs text-red-500 max-w-[400px] whitespace-pre-line" title={task.error}>: {task.error}</span>}
               </div>
               <div className="flex items-center gap-1.5">
-                {(task.status === 'running' || task.status === 'paused') && !task.hasResult && (
+                {(task.status === 'running' || task.status === 'paused') && (
                   <>
                     <button onClick={task.handlePauseResume} className={cn("px-2.5 py-1 text-xs font-medium rounded-lg transition-colors flex items-center gap-1", task.status === 'paused' ? "bg-green-900/20 text-green-400 hover:bg-green-900/30" : "bg-yellow-900/20 text-yellow-400 hover:bg-yellow-900/30")}>
                       {task.status === 'paused' ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}
@@ -174,7 +227,7 @@ export default function AddAccountDialog({ accountId, onAccountIdChange, onClose
                 <Plus className="w-3 h-3" />{t('accounts.add.start_btn', 'Add Account')}
               </button>
             )}
-            {task.status === 'done' && (
+            {accountId && task.status === 'done' && (
               <button onClick={handleAddAnother} className="px-4 py-1.5 text-xs font-medium bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors flex items-center gap-1">
                 <Plus className="w-3 h-3" />{t('accounts.add.add_another', 'Add Another')}
               </button>
@@ -193,6 +246,52 @@ export default function AddAccountDialog({ accountId, onAccountIdChange, onClose
           </div>
         </div>
       </div>
+
+      {/* Child dialog: Static Proxy Edit (z-[55] above AddDialog z-50) */}
+      {showStaticEditDialog && (
+        <div
+          className="fixed inset-0 z-[55] flex items-center justify-center bg-black/50"
+          onClick={(e) => {
+            // Stop bubbling so closing the child dialog does not also close
+            // the parent AddAccountDialog (parent backdrop has onClick=onClose).
+            e.stopPropagation();
+            setShowStaticEditDialog(false);
+          }}
+        >
+          <div
+            className="bg-base-100 rounded-xl shadow-2xl w-[420px] p-4 border border-base-300"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-base-content">
+                {t('accounts.add.static_edit_title', 'Configure Static Proxy')}
+              </h3>
+              <button
+                onClick={() => setShowStaticEditDialog(false)}
+                className="p-1 rounded text-gray-400 hover:text-gray-300"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <StaticProxyEditPanel
+              mode="add"
+              initialStaticProxy={staticProxy}
+              initialTestResult={testResult}
+              onSave={(sp, tr) => {
+                onStaticProxyChange(sp);
+                onTestResultChange(tr);
+                setShowStaticEditDialog(false);
+              }}
+              onDelete={() => {
+                onStaticProxyChange(null);
+                onTestResultChange(null);
+                setShowStaticEditDialog(false);
+              }}
+              onToast={(msg) => onToast?.(msg)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

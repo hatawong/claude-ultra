@@ -30,11 +30,12 @@ pub struct RequestLog {
     pub error: Option<String>,
     pub request_size: Option<u64>,
     pub response_size: Option<u64>,
-    // Security fields (Round 9)
+    // Security fields
     pub client_ip: Option<String>,
     pub user_agent: Option<String>,
     pub api_key_prefix: Option<String>,
-    // Body fields (Round 21)
+    // Body fields
+
     pub request_body: Option<String>,
     pub response_body: Option<String>,
     // Headers as JSON array: [["name","value"], ...]

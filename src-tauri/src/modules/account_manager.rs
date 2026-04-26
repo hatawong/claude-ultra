@@ -137,6 +137,17 @@ impl AccountManager {
                             account_id,
                             account.route_country.as_deref(),
                         );
+                        consumers.client_manager.set_has_static_proxy(
+                            account_id,
+                            account.static_proxy.is_some(),
+                        );
+                        consumers.client_manager.set_static_proxy_url(
+                            account_id,
+                            account
+                                .static_proxy
+                                .as_ref()
+                                .map(crate::proxy::allocator::build_static_proxy_url),
+                        );
                     }
                     consumers.emit_frontend("account://changed", account_id);
                 }
@@ -240,7 +251,7 @@ impl AccountManager {
     }
 
     /// Update route_mode and/or route_country.
-    /// route_mode: only "proxy" / "vercel" / "direct" accepted; invalid values ignored (warn).
+    /// route_mode: only "proxy" / "static" / "vercel" / "direct" accepted; invalid values ignored (warn).
     /// route_country: empty string clears (None); only known PROXY_COUNTRIES accepted.
     /// Emits AccountChange::RouteUpdated (ClientManager cache sync + frontend refresh).
     pub async fn set_route(
@@ -252,7 +263,7 @@ impl AccountManager {
         self.update(account_id, |a| {
             if let Some(ref rm) = route_mode {
                 let lc = rm.to_lowercase();
-                if ["proxy", "vercel", "direct"].contains(&lc.as_str()) {
+                if ["proxy", "static", "vercel", "direct"].contains(&lc.as_str()) {
                     a.route_mode = lc;
                 } else {
                     tracing::warn!("invalid route_mode '{}', ignoring", rm);
@@ -270,7 +281,34 @@ impl AccountManager {
                     }
                 }
             }
+            // Configuration sanity check: route_mode='static' without
+            // staticProxy will fall back at request time (resolve_route picks
+            // the next available transport). Warn at config time so the
+            // misconfiguration surfaces in logs instead of silent fallback.
+            if a.route_mode == "static" && a.static_proxy.is_none() {
+                tracing::warn!(
+                    account_id = %account_id,
+                    "route_mode='static' configured without staticProxy; \
+                     requests will fall back via resolve_route. Configure \
+                     staticProxy or change route_mode to avoid silent fallback."
+                );
+            }
         }).await?;
+        self.route_change(account_id, AccountChange::RouteUpdated).await;
+        Ok(())
+    }
+
+    /// Set Account.static_proxy (per-account static residential proxy creds).
+    /// - `Some(sp)` → write static_proxy
+    /// - `None` → clear (a.static_proxy = None)
+    /// Emits AccountChange::RouteUpdated so ClientManager.set_static_proxy_url
+    /// cache is rebuilt and the gateway hot path picks up the new credentials.
+    pub async fn set_static_proxy(
+        &self,
+        account_id: &str,
+        static_proxy: Option<crate::models::account::StaticProxy>,
+    ) -> Result<(), String> {
+        self.update(account_id, move |a| { a.static_proxy = static_proxy; }).await?;
         self.route_change(account_id, AccountChange::RouteUpdated).await;
         Ok(())
     }
@@ -286,6 +324,74 @@ impl AccountManager {
     ) -> Result<(), String> {
         self.update(account_id, move |a| { a.proxy = proxy; }).await?;
         self.route_change(account_id, AccountChange::ProxyUpdated).await;
+        Ok(())
+    }
+
+    /// Atomic update of route_mode + route_country + static_proxy + proxy in a
+    /// single write lock + single disk write. Each field uses tri-state Option:
+    /// outer None = keep, Some(None) = clear, Some(Some(_)) = set. Avoids
+    /// half-applied state when a route change touches multiple fields (e.g.
+    /// switching to/from static both moves route_mode and writes/clears
+    /// staticProxy + proxy snapshot).
+    ///
+    /// Emits up to two events: RouteUpdated (always), ProxyUpdated (only when
+    /// proxy field actually changed).
+    pub async fn set_route_bundle(
+        &self,
+        account_id: &str,
+        route_mode: Option<String>,
+        route_country: Option<Option<String>>,
+        static_proxy: Option<Option<crate::models::account::StaticProxy>>,
+        proxy: Option<Option<crate::models::account::ProxySection>>,
+    ) -> Result<(), String> {
+        let proxy_changed = proxy.is_some();
+        self.update(account_id, move |a| {
+            if let Some(rm) = route_mode {
+                let lc = rm.to_lowercase();
+                if ["proxy", "static", "vercel", "direct"].contains(&lc.as_str()) {
+                    a.route_mode = lc;
+                } else {
+                    tracing::warn!("invalid route_mode '{}', ignoring", rm);
+                }
+            }
+            if let Some(rc_opt) = route_country {
+                match rc_opt {
+                    None => a.route_country = None,
+                    Some(rc) if rc.is_empty() => a.route_country = None,
+                    Some(rc) => {
+                        let lower = rc.to_lowercase();
+                        if crate::gateway::route::PROXY_COUNTRIES.contains(&lower.as_str()) {
+                            a.route_country = Some(lower);
+                        } else {
+                            tracing::warn!("invalid route_country '{}', ignoring", rc);
+                        }
+                    }
+                }
+            }
+            if let Some(sp_opt) = static_proxy {
+                a.static_proxy = sp_opt;
+            }
+            if let Some(p_opt) = proxy {
+                a.proxy = p_opt;
+            }
+            // Configuration sanity check: route_mode='static' without
+            // staticProxy will fall back at request time. Warn at config
+            // time so the misconfiguration surfaces in logs instead of
+            // silent fallback. Mirrors set_route's check so both single-
+            // field and bundle paths emit the same diagnostic.
+            if a.route_mode == "static" && a.static_proxy.is_none() {
+                tracing::warn!(
+                    account_id = %account_id,
+                    "route_mode='static' configured without staticProxy; \
+                     requests will fall back via resolve_route. Configure \
+                     staticProxy or change route_mode to avoid silent fallback."
+                );
+            }
+        }).await?;
+        self.route_change(account_id, AccountChange::RouteUpdated).await;
+        if proxy_changed {
+            self.route_change(account_id, AccountChange::ProxyUpdated).await;
+        }
         Ok(())
     }
 
@@ -677,6 +783,171 @@ mod tests {
             r#"{"accountId":"a1","email":"dup@test.com"}"#
         ).unwrap();
         assert!(mgr.write_new(&account).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_set_route_static_accepted() {
+        // "static" must be accepted in the route_mode whitelist.
+        let dir = TestDir::new();
+        write_v3_account(&dir.path, "a1", "a1@test.com");
+        let mgr = AccountManager::new(dir.path.clone());
+
+        mgr.set_route("a1", Some("static".to_string()), None).await.unwrap();
+        let account = mgr.read("a1").await.unwrap();
+        assert_eq!(account.route_mode, "static");
+
+        // Invalid mode is ignored (warn), prior value preserved.
+        mgr.set_route("a1", Some("invalid_mode".to_string()), None).await.unwrap();
+        let account = mgr.read("a1").await.unwrap();
+        assert_eq!(account.route_mode, "static");
+    }
+
+    fn sample_static_proxy() -> crate::models::account::StaticProxy {
+        crate::models::account::StaticProxy {
+            protocol: "socks5".to_string(),
+            host: "h.example".to_string(),
+            port: 1080,
+            username: "u".to_string(),
+            password: "p".to_string(),
+        }
+    }
+
+    fn sample_proxy_section() -> crate::models::account::ProxySection {
+        crate::models::account::ProxySection {
+            session_id: "static-h.example-1080".to_string(),
+            host: "h.example:1080".to_string(),
+            last_ip: Some("203.0.113.10".to_string()),
+            country: Some("United States".to_string()),
+            region: None,
+            city: None,
+            isp: None,
+            quality: Some("residential".to_string()),
+            last_checked: Some(0),
+            proxy_type: Some("residential".to_string()),
+            lifetime: Some("static".to_string()),
+            created_at: Some(0),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_set_route_bundle_writes_all_four_fields_atomically() {
+        let dir = TestDir::new();
+        write_v3_account(&dir.path, "a1", "a1@test.com");
+        let mgr = AccountManager::new(dir.path.clone());
+
+        let sp = sample_static_proxy();
+        let snap = sample_proxy_section();
+        mgr.set_route_bundle(
+            "a1",
+            Some("static".to_string()),
+            Some(Some("us".to_string())),
+            Some(Some(sp.clone())),
+            Some(Some(snap.clone())),
+        ).await.unwrap();
+
+        let account = mgr.read("a1").await.unwrap();
+        assert_eq!(account.route_mode, "static");
+        assert_eq!(account.route_country.as_deref(), Some("us"));
+        assert_eq!(account.static_proxy, Some(sp));
+        assert!(account.proxy.is_some());
+        assert_eq!(account.proxy.unwrap().last_ip.as_deref(), Some("203.0.113.10"));
+    }
+
+    #[tokio::test]
+    async fn test_set_route_bundle_none_keeps_field_unchanged() {
+        let dir = TestDir::new();
+        write_v3_account(&dir.path, "a1", "a1@test.com");
+        let mgr = AccountManager::new(dir.path.clone());
+
+        // Seed with all four fields populated.
+        let sp = sample_static_proxy();
+        let snap = sample_proxy_section();
+        mgr.set_route_bundle(
+            "a1",
+            Some("static".to_string()),
+            Some(Some("us".to_string())),
+            Some(Some(sp.clone())),
+            Some(Some(snap.clone())),
+        ).await.unwrap();
+
+        // Update only route_mode; other three fields preserved.
+        mgr.set_route_bundle("a1", Some("vercel".to_string()), None, None, None)
+            .await.unwrap();
+
+        let account = mgr.read("a1").await.unwrap();
+        assert_eq!(account.route_mode, "vercel");
+        assert_eq!(account.route_country.as_deref(), Some("us"));
+        assert_eq!(account.static_proxy, Some(sp));
+        assert!(account.proxy.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_set_route_bundle_some_none_clears_field() {
+        let dir = TestDir::new();
+        write_v3_account(&dir.path, "a1", "a1@test.com");
+        let mgr = AccountManager::new(dir.path.clone());
+
+        let sp = sample_static_proxy();
+        let snap = sample_proxy_section();
+        mgr.set_route_bundle(
+            "a1",
+            Some("static".to_string()),
+            Some(Some("us".to_string())),
+            Some(Some(sp)),
+            Some(Some(snap)),
+        ).await.unwrap();
+
+        // User switches back to proxy + clears staticProxy + clears snapshot.
+        mgr.set_route_bundle(
+            "a1",
+            Some("proxy".to_string()),
+            Some(None),
+            Some(None),
+            Some(None),
+        ).await.unwrap();
+
+        let account = mgr.read("a1").await.unwrap();
+        assert_eq!(account.route_mode, "proxy");
+        assert_eq!(account.route_country, None);
+        assert_eq!(account.static_proxy, None);
+        assert!(account.proxy.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_route_bundle_static_keeps_existing_proxy_when_no_probe() {
+        // retry path semantics: staticProxy=Some + probedProxy=None
+        // → outer code passes proxy=None (keep) so existing snapshot stays.
+        let dir = TestDir::new();
+        write_v3_account(&dir.path, "a1", "a1@test.com");
+        let mgr = AccountManager::new(dir.path.clone());
+
+        let sp = sample_static_proxy();
+        let snap = sample_proxy_section();
+        mgr.set_route_bundle(
+            "a1",
+            Some("static".to_string()),
+            None,
+            Some(Some(sp.clone())),
+            Some(Some(snap.clone())),
+        ).await.unwrap();
+
+        // Retry with new staticProxy but no fresh probe → preserve a.proxy.
+        let new_sp = crate::models::account::StaticProxy {
+            host: "h2.example".to_string(),
+            ..sp
+        };
+        mgr.set_route_bundle(
+            "a1",
+            Some("static".to_string()),
+            None,
+            Some(Some(new_sp.clone())),
+            None,  // outer: probedProxy=None → keep existing
+        ).await.unwrap();
+
+        let account = mgr.read("a1").await.unwrap();
+        assert_eq!(account.static_proxy, Some(new_sp));
+        assert!(account.proxy.is_some());
+        assert_eq!(account.proxy.unwrap().last_ip.as_deref(), Some("203.0.113.10"));
     }
 
 }

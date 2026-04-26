@@ -20,8 +20,8 @@ Claude Ultra supports residential proxy rotation to avoid IP-based rate limiting
 
 1. In the IPRoyal dashboard, go to **Residential Proxies → Setup**
 2. You will see:
-   - **Username** (e.g. `customer-xxxx`)
-   - **Password** (a long string)
+   - **Username**
+   - **Password**
 3. Keep these credentials — you'll enter them in Claude Ultra
 
 ## Step 4: Configure in Claude Ultra
@@ -34,7 +34,7 @@ Claude Ultra supports residential proxy rotation to avoid IP-based rate limiting
 |-------|-------|
 | Host | `geo.iproyal.com` (default, no need to change) |
 | Port | `12321` (default, no need to change) |
-| Username | Your IPRoyal username (e.g. `customer-xxxx`) |
+| Username | Your IPRoyal username |
 | Password | Your IPRoyal password |
 | Country | `us` (default) or any [supported country code](https://iproyal.com/locations/) |
 
@@ -46,28 +46,41 @@ Or edit `~/.claude-ultra/config.json` directly:
 {
   "proxy": {
     "default_type": "residential",
+    "default_country": "us",
     "residential": {
+      "kind": "iproyal",
       "host": "geo.iproyal.com",
       "port": 12321,
-      "username": "customer-xxxx",
-      "password": "your_password_here",
-      "default_country": "us"
+      "username": "your_username_here",
+      "password": "your_password_here"
     }
   }
 }
 ```
 
+## Provider Selection
+
+`proxy.residential.kind`: `"iproyal"` (default) or `"ipfoxy"`. Decides URL format dispatch:
+- IPRoyal: params in password segment (underscore-separated), host=`geo.iproyal.com:12321`
+- IPFoxy: params in username segment (hyphen-separated), host=`gate.ipfoxy.io:58688`
+
+Switch via Settings UI → Proxy → Provider dropdown.
+
 ## Step 5: Verify
 
-After saving, Claude Ultra will route API requests through IPRoyal residential proxies. Each account session gets a sticky IP (fixed for 24 hours), and IPs rotate automatically between sessions.
+After saving, Claude Ultra will route API requests through residential proxies. Each account session gets a sticky IP, and IPs rotate automatically between sessions.
+
+**Sticky duration by provider**:
+- IPRoyal: ~24 hours per session (configurable via `_lifetime-Nh` URL param, manager defaults to 24h)
+- IPFoxy: ~120 minutes max per session, drops after 15 minutes idle (account-level setting, no URL parameter override)
 
 You can verify proxy usage in **Traffic Logs** — the proxy column will show the assigned IP.
 
 ## How It Works
 
-- Each Claude account is assigned a **sticky residential IP** for 24 hours
+- Each Claude account is assigned a **sticky residential IP** (duration depends on provider, see Step 5)
 - When accounts rotate, a new session ID is generated → new IP
-- Traffic is billed per GB by IPRoyal (not by Claude Ultra)
+- Traffic is billed by the provider (IPRoyal: per GB / IPFoxy: per IP-month or GB depending on plan), not by Claude Ultra
 - If proxy credentials are empty, Claude Ultra connects directly (no proxy)
 
 ## Supported Countries

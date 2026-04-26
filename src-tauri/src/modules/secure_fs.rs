@@ -13,7 +13,7 @@ use std::path::Path;
 
 /// Write `content` to `path` atomically with owner-only permissions (0600 on Unix).
 ///
-/// Implementation rationale (v1.0.1 hardening — address fix-review findings):
+/// Implementation rationale (credential file hardening):
 ///
 /// 1. **No permission window**: on Unix the temp file is created with `mode(0o600)`
 ///    via `OpenOptions` at creation time, not chmod'd after. A naive `fs::write`
@@ -82,7 +82,7 @@ pub fn secure_write(path: &Path, content: &[u8]) -> Result<(), String> {
     let rename_result = std::fs::rename(&tmp_path, path);
     #[cfg(not(unix))]
     let rename_result = {
-        // Windows: remove existing target first (still non-atomic, accepted for v1.0.1).
+        // Windows: remove existing target first (rename does not overwrite; non-atomic, accepted).
         let _ = std::fs::remove_file(path);
         std::fs::rename(&tmp_path, path)
     };
@@ -192,9 +192,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_secure_write_no_umask_window() {
-        // Regression test for v1.0.1 fix-review P1: prior implementation used
-        // fs::write() + chmod, creating a window where the file existed at
-        // umask-derived mode (0644) with credentials inside before chmod ran.
+        // Regression guard: a `fs::write() + chmod` pattern would leave the file
+        // briefly at umask-derived mode (0644) with credentials inside before chmod ran.
         // Current impl uses OpenOptions::mode(0o600).create_new(true), which sets
         // 0600 atomically at creation.
         //

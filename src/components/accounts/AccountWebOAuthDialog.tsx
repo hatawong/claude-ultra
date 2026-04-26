@@ -90,7 +90,7 @@ export default function AccountWebOAuthDialog({ account, onClose }: AccountWebOA
                 {task.error && <span className="text-xs text-red-500 max-w-[400px] whitespace-pre-line" title={task.error}>: {task.error}</span>}
               </div>
               <div className="flex items-center gap-1.5">
-                {(task.status === 'running' || task.status === 'paused') && !task.hasResult && (
+                {(task.status === 'running' || task.status === 'paused') && (
                   <>
                     <button onClick={task.handlePauseResume} className={cn("px-2.5 py-1 text-xs font-medium rounded-lg transition-colors flex items-center gap-1", task.status === 'paused' ? "bg-green-900/20 text-green-400 hover:bg-green-900/30" : "bg-yellow-900/20 text-yellow-400 hover:bg-yellow-900/30")}>
                       {task.status === 'paused' ? <Play className="w-3 h-3" /> : <Pause className="w-3 h-3" />}

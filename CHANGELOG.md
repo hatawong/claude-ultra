@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.5.119 — 2026-04-26
+
+### New Features
+
+- **Static residential proxy** — Each account can bind a static SOCKS5 / HTTP residential proxy directly (no provider rotation). Add via the new Static Proxy entry in Add Account dialog: paste credentials → test connection → save. RouteEditor supports switching any account to Static mode at any time.
+- **IPFoxy dynamic proxy** — Second dynamic proxy provider alongside IPRoyal. Configurable per account in Settings → Proxy.
+
 ## v1.4.119 — 2026-04-24
 
 ### Bug Fixes

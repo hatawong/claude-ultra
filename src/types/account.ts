@@ -58,6 +58,16 @@ export interface WebClient {
   lastActivity: number | null;
 }
 
+export type StaticProtocol = 'socks5' | 'http';
+
+export interface StaticProxy {
+  protocol: StaticProtocol;
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+}
+
 export interface ProxySection {
   sessionId: string;
   host: string;
@@ -71,6 +81,23 @@ export interface ProxySection {
   type?: string;       // residential | mobile
   lifetime?: string;   // 24h etc.
   createdAt?: number;  // session creation time (ms)
+}
+
+/**
+ * Result returned by test_proxy_connection / test_static_proxy_dryrun /
+ * test_static_proxy_connection IPC. Mirrors Rust commands::proxy::ProxyTestResult.
+ *
+ * proxySection is populated only by static-proxy probe paths so the Save flow
+ * can forward it to update_account_route.probedProxy / add_account_and_login
+ * for atomic write of route_mode + staticProxy + proxy snapshot.
+ */
+export interface ProxyTestResult {
+  ok: boolean;
+  mode: string;
+  ip: string | null;
+  country: string | null;
+  error: string | null;
+  proxySection?: ProxySection | null;
 }
 
 // ─── Account V3 ──────────────────────────────────────────────
@@ -89,8 +116,9 @@ export interface Account {
   createdAt: number;
 
   // Routing (per-account)
-  routeMode: string;        // "proxy" | "direct" | "vercel"
+  routeMode: string;        // "proxy" | "static" | "vercel" | "direct"
   routeCountry?: string;    // proxy target country, null = follow registration country
+  staticProxy?: StaticProxy; // per-account static residential proxy (used when routeMode === "static")
 
   // Plan
   subscriptionType: string;

@@ -121,6 +121,22 @@ impl ProxySection {
     }
 }
 
+/// Static residential proxy credentials. Bound 1:1 to the account; used when
+/// route_mode == "static". Independent from ProxySection (which holds runtime
+/// IP verification state).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaticProxy {
+    /// Protocol: "socks5" or "http". No socks5h in this round.
+    pub protocol: String,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub password: String,
+    // No country field: account identity country is Account.country, runtime
+    // measured country is ProxySection.country.
+}
+
 // ─── Account V3 ──────────────────────────────────────────────
 
 fn default_free() -> String {
@@ -158,7 +174,12 @@ pub struct Account {
     pub created_at: i64,
 
     // ── Routing (per-account) ───────────────
-    /// Routing mode: "proxy" (default) | "direct" | "vercel"
+    /// Routing mode: "proxy" (default) | "static" | "vercel" | "direct".
+    /// "static" dispatches via per-account `static_proxy` through
+    /// `state.client.proxy(url)` independently from the dynamic ProxyPool.
+    /// When `static_proxy` is missing the gateway falls through the
+    /// Vercel/Proxy/Direct chain (see `gateway/route.rs::resolve_route`);
+    /// paid/configured transports take priority over Direct (real-IP exposure).
     #[serde(default = "default_route_mode")]
     pub route_mode: String,
     /// Target country for proxy mode. None = fallback to self.country.
@@ -191,6 +212,12 @@ pub struct Account {
 
     // ── Proxy ────────────────────────────────
     pub proxy: Option<ProxySection>,
+
+    /// Static proxy credentials. Used when route_mode == "static".
+    /// Coexists with `proxy: ProxySection` (runtime state) — they are not
+    /// alternatives but complementary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub static_proxy: Option<StaticProxy>,
 
     // ── Utilization ───
     pub utilization: Option<serde_json::Value>,
@@ -274,8 +301,8 @@ fn get_accounts_dir() -> Result<std::path::PathBuf, String> {
     Ok(home.join(".claude-ultra").join("accounts"))
 }
 
-// NOTE: `migrate_region_to_country` removed — round 42 dropped the legacy `region`
-// field (no live users). Existing JSON cleaned manually (`jq 'del(.region)'`).
+// NOTE: Legacy `region` field migration removed (no live users carry it;
+// existing JSON was cleaned manually via `jq 'del(.region)'`).
 
 #[tauri::command]
 pub async fn list_accounts() -> Result<Vec<Account>, String> {
@@ -455,6 +482,7 @@ mod tests {
             user_disabled_reason: None,
             user_disabled_at: None,
             proxy: None,
+            static_proxy: None,
             utilization: None,
             route_mode: "proxy".to_string(),
             route_country: None,
@@ -675,7 +703,57 @@ mod tests {
         assert_eq!(account.subscription_type, restored.subscription_type);
     }
 
-    // ── 7. list_accounts_in_dir (migrated from Round 1) ──────
+    // ── StaticProxy ──────────────────────────────────────────
+
+    #[test]
+    fn test_static_proxy_default_none() {
+        // Legacy Account JSON without staticProxy field deserializes with None (backward compat).
+        let json = r#"{"accountId":"a","email":"e@t.com"}"#;
+        let account: Account = serde_json::from_str(json).unwrap();
+        assert!(account.static_proxy.is_none());
+    }
+
+    #[test]
+    fn test_static_proxy_serde_round_trip_socks5() {
+        // Host uses RFC 5737 TEST-NET-3 (203.0.113.0/24) reserved for documentation.
+        let json = r#"{
+            "accountId": "a", "email": "e@t.com",
+            "staticProxy": {
+                "protocol": "socks5",
+                "host": "203.0.113.10",
+                "port": 45001,
+                "username": "user1",
+                "password": "p@ss"
+            }
+        }"#;
+        let account: Account = serde_json::from_str(json).unwrap();
+        let sp = account.static_proxy.as_ref().unwrap();
+        assert_eq!(sp.protocol, "socks5");
+        assert_eq!(sp.host, "203.0.113.10");
+        assert_eq!(sp.port, 45001);
+        assert_eq!(sp.username, "user1");
+        assert_eq!(sp.password, "p@ss");
+
+        let serialized = serde_json::to_string(&account).unwrap();
+        assert!(serialized.contains("\"staticProxy\""));
+        assert!(serialized.contains("\"protocol\":\"socks5\""));
+        let restored: Account = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored.static_proxy.as_ref().unwrap().port, 45001);
+    }
+
+    #[test]
+    fn test_static_proxy_serde_round_trip_http() {
+        let json = r#"{
+            "accountId": "a", "email": "e@t.com",
+            "staticProxy": {"protocol":"http","host":"h.example","port":8080,"username":"u","password":"p"}
+        }"#;
+        let account: Account = serde_json::from_str(json).unwrap();
+        let sp = account.static_proxy.as_ref().unwrap();
+        assert_eq!(sp.protocol, "http");
+        assert_eq!(sp.port, 8080);
+    }
+
+    // ── list_accounts_in_dir ──────────────────────────────────
 
     fn create_v1_file(dir: &Path, account_id: &str, email: &str, created_at: i64) {
         let json = format!(

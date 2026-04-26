@@ -5,11 +5,13 @@
 //! Does not depend on Tauri.
 
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use claude_ultra_http::BoringClient;
@@ -18,6 +20,21 @@ use crate::models::quota::QuotaSnapshot;
 #[cfg(test)]
 use crate::models::quota::ClaudeAILimit;
 use crate::modules::cli_client::CliClient;
+
+/// Session affinity persistence — keep mappings across app restarts so
+/// sticky sessions survive a restart. 7-day TTL bounds the file size; older
+/// entries are pruned at load and at every flush.
+const SESSION_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+/// Debounce flushes — multiple session_map mutations within this window
+/// coalesce into a single atomic write.
+const SESSION_FLUSH_DEBOUNCE_MS: u64 = 5_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SessionRecord {
+    sid: String,
+    aid: String,
+    last_used_ms: i64,
+}
 
 /// Per-account runtime state — not persisted, generated on startup.
 #[derive(Debug, Clone)]
@@ -29,10 +46,19 @@ pub struct AccountRuntimeState {
     /// ISO 3166-1 alpha-2 lowercase. Mirrors Account.country for gateway hot path —
     /// avoids per-request account JSON read. Synced via AccountChange::RouteUpdated.
     pub country: String,
-    /// Per-account routing mode: "proxy" | "direct" | "vercel"
+    /// Per-account routing mode: "proxy" | "static" | "vercel" | "direct".
     pub route_mode: String,
     /// Per-account proxy country override. None = follow account.country.
     pub route_country: Option<String>,
+    /// Mirror of `Account.static_proxy.is_some()` for the gateway hot path —
+    /// avoids per-request account JSON read when resolving routeMode=static
+    /// against `has_static`. Synced via AccountChange::RouteUpdated.
+    pub has_static_proxy: bool,
+    /// Pre-built static proxy URL (e.g. `socks5://u:p@host:port`) when the
+    /// account has staticProxy configured. Hot-path cache so the gateway
+    /// Static arm can dispatch without a per-request disk read or URL build.
+    /// Synced via AccountChange::RouteUpdated alongside `has_static_proxy`.
+    pub static_proxy_url: Option<String>,
 }
 
 /// Manages a pool of CliClients with round-robin selection, watermark filtering,
@@ -52,8 +78,19 @@ pub struct ClientManager {
     boring_client: Arc<BoringClient>,
     /// Temp unschedule map: account_id → (until_ms, reason).
     temp_unschedulable: DashMap<String, (i64, String)>,
-    /// Session affinity: session_id → (account_id, last_used_epoch_ms)
+    /// Session affinity: session_id → (account_id, last_used_epoch_ms).
+    /// Persisted to `sessions_path` (when set) with debounce so a restart
+    /// does not roam an active session to a different account.
     session_map: DashMap<String, (String, i64)>,
+    /// Optional persistence path for session_map (e.g.
+    /// ~/.claude-ultra/sessions.json). When None the session_map lives only
+    /// in memory (typical in tests).
+    sessions_path: Option<PathBuf>,
+    /// Wakeup channel for the debounced flush task. Notified after every
+    /// session_map mutation; the task sleeps SESSION_FLUSH_DEBOUNCE_MS and
+    /// then writes a snapshot. Notify coalesces multiple notifications,
+    /// giving us free debouncing.
+    flush_notify: Arc<Notify>,
     /// Watermark thresholds (0.0-1.0).
     safety_watermark: f64,
     alert_watermark: f64,
@@ -70,6 +107,8 @@ impl ClientManager {
             boring_client,
             temp_unschedulable: DashMap::new(),
             session_map: DashMap::new(),
+            sessions_path: None,
+            flush_notify: Arc::new(Notify::new()),
             safety_watermark: 0.8,
             alert_watermark: 0.95,
         }
@@ -79,6 +118,101 @@ impl ClientManager {
         self.safety_watermark = safety;
         self.alert_watermark = alert;
         self
+    }
+
+    /// Configure session-affinity persistence. The current sessions.json (if
+    /// any) is loaded immediately so callers see prior mappings before any
+    /// request arrives. Call `start_flush_task` after wrapping in Arc to
+    /// enable debounced background writes.
+    pub fn with_sessions_path(mut self, path: PathBuf) -> Self {
+        let map = Self::load_sessions_from_disk(&path);
+        for (sid, val) in map {
+            self.session_map.insert(sid, val);
+        }
+        self.sessions_path = Some(path);
+        self
+    }
+
+    /// Spawn the debounced flush task. Must be called once on the Arc<Self>
+    /// after construction; no-op when no sessions_path is configured.
+    pub fn start_flush_task(self: &Arc<Self>) {
+        if self.sessions_path.is_none() {
+            return;
+        }
+        let me = Arc::clone(self);
+        tokio::spawn(async move {
+            loop {
+                me.flush_notify.notified().await;
+                tokio::time::sleep(Duration::from_millis(SESSION_FLUSH_DEBOUNCE_MS)).await;
+                if let Err(e) = me.flush_sessions_to_disk() {
+                    tracing::warn!("session flush failed: {}", e);
+                }
+            }
+        });
+    }
+
+    /// Notify the background task that session_map has mutated. Coalesces
+    /// freely — multiple calls within the debounce window result in one
+    /// flush. No-op when persistence is disabled.
+    fn schedule_flush(&self) {
+        if self.sessions_path.is_some() {
+            self.flush_notify.notify_one();
+        }
+    }
+
+    /// Load session_map records from disk, dropping entries older than the
+    /// TTL. Errors (missing file, parse failure) yield an empty map plus a
+    /// warning so a corrupt sessions.json never blocks startup.
+    fn load_sessions_from_disk(path: &Path) -> DashMap<String, (String, i64)> {
+        let map = DashMap::new();
+        if !path.exists() {
+            return map;
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("read {}: {} (sessions reset)", path.display(), e);
+                return map;
+            }
+        };
+        let records: Vec<SessionRecord> = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("parse {}: {} (sessions reset)", path.display(), e);
+                return map;
+            }
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        for r in records {
+            if now_ms - r.last_used_ms < SESSION_TTL_MS {
+                map.insert(r.sid, (r.aid, r.last_used_ms));
+            }
+        }
+        map
+    }
+
+    /// Snapshot session_map (with TTL prune) and atomically write to
+    /// sessions_path. Errors propagate so the caller can log them; the
+    /// flush task treats them as non-fatal.
+    fn flush_sessions_to_disk(&self) -> Result<(), String> {
+        let path = match self.sessions_path.as_ref() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let records: Vec<SessionRecord> = self
+            .session_map
+            .iter()
+            .filter(|e| now_ms - e.value().1 < SESSION_TTL_MS)
+            .map(|e| SessionRecord {
+                sid: e.key().clone(),
+                aid: e.value().0.clone(),
+                last_used_ms: e.value().1,
+            })
+            .collect();
+        let value = serde_json::to_value(&records)
+            .map_err(|e| format!("serialize session records: {}", e))?;
+        crate::modules::secure_fs::secure_write_json(path, &value)
     }
 
     /// Validate device_id format: must be exactly 64 lowercase hex chars.
@@ -104,7 +238,10 @@ impl ClientManager {
         self.clients.clear();
         self.runtime_state.clear();
         self.temp_unschedulable.clear();
-        self.session_map.clear();
+        // session_map intentionally not cleared: persisted sticky sessions
+        // survive a reload of the account pool. Stale entries pointing to
+        // accounts no longer present are retained for now and pruned at
+        // the end of this fn (after we know the new account set).
 
         for entry in entries {
             let entry = match entry {
@@ -177,6 +314,11 @@ impl ClientManager {
                 country: account.resolve_country(),
                 route_mode: account.route_mode.clone(),
                 route_country: account.route_country.clone(),
+                has_static_proxy: account.static_proxy.is_some(),
+                static_proxy_url: account
+                    .static_proxy
+                    .as_ref()
+                    .map(crate::proxy::allocator::build_static_proxy_url),
             };
 
             self.runtime_state.insert(id.clone(), runtime);
@@ -186,6 +328,14 @@ impl ClientManager {
         let mut ids: Vec<String> = self.clients.iter().map(|e| e.key().clone()).collect();
         ids.sort();
         *self.ordered_ids.write().unwrap() = ids;
+
+        // Drop session affinity for accounts no longer present after reload.
+        let valid_aids: HashSet<String> = self.clients.iter().map(|e| e.key().clone()).collect();
+        let before = self.session_map.len();
+        self.session_map.retain(|_, (aid, _)| valid_aids.contains(aid));
+        if self.session_map.len() != before {
+            self.schedule_flush();
+        }
 
         Ok(self.clients.len())
     }
@@ -203,7 +353,7 @@ impl ClientManager {
         self.clients.clear();
         self.runtime_state.clear();
         self.temp_unschedulable.clear();
-        self.session_map.clear();
+        // session_map intentionally not cleared — see note in load_clients.
 
         for entry in entries {
             let entry = match entry {
@@ -273,6 +423,8 @@ impl ClientManager {
                         country: "us".to_string(), // legacy token: no country info
                         route_mode: "proxy".to_string(),
                         route_country: None,
+                        has_static_proxy: false,
+                        static_proxy_url: None,
                     };
                     self.runtime_state.insert(id.clone(), runtime);
                     self.clients.insert(id, cli);
@@ -287,6 +439,14 @@ impl ClientManager {
         let mut ids: Vec<String> = self.clients.iter().map(|e| e.key().clone()).collect();
         ids.sort();
         *self.ordered_ids.write().unwrap() = ids;
+
+        // Drop session affinity for accounts no longer present after reload.
+        let valid_aids: HashSet<String> = self.clients.iter().map(|e| e.key().clone()).collect();
+        let before = self.session_map.len();
+        self.session_map.retain(|_, (aid, _)| valid_aids.contains(aid));
+        if self.session_map.len() != before {
+            self.schedule_flush();
+        }
 
         Ok(self.clients.len())
     }
@@ -330,6 +490,11 @@ impl ClientManager {
             country: account.resolve_country(),
             route_mode: account.route_mode.clone(),
             route_country: account.route_country.clone(),
+            has_static_proxy: account.static_proxy.is_some(),
+            static_proxy_url: account
+                .static_proxy
+                .as_ref()
+                .map(crate::proxy::allocator::build_static_proxy_url),
         };
 
         self.runtime_state.insert(id.clone(), runtime);
@@ -441,6 +606,7 @@ impl ClientManager {
                     if is_available {
                         // Update last-used timestamp (safe — no outstanding Ref on session_map)
                         self.session_map.insert(sid.to_string(), (aid.clone(), now_ms));
+                        self.schedule_flush();
                         tracing::debug!("Session affinity hit: {} → {}", sid, aid);
                         return Some(client);
                     }
@@ -454,6 +620,7 @@ impl ClientManager {
                 // Account unavailable — remove stale mapping (safe — no outstanding Ref)
                 tracing::debug!("Session affinity miss (unavailable): {} → {}, reassigning", sid, aid);
                 self.session_map.remove(sid);
+                self.schedule_flush();
             }
         }
 
@@ -464,6 +631,7 @@ impl ClientManager {
         if let Some(sid) = session_id {
             let now_ms = chrono::Utc::now().timestamp_millis();
             self.session_map.insert(sid.to_string(), (client.account_id.clone(), now_ms));
+            self.schedule_flush();
             tracing::debug!("Session affinity new: {} → {}", sid, client.account_id);
         }
 
@@ -483,7 +651,11 @@ impl ClientManager {
             ids.retain(|id| id != account_id);
         }
         // Clean up session affinity pointing to this account
+        let before = self.session_map.len();
         self.session_map.retain(|_, (aid, _)| aid != account_id);
+        if self.session_map.len() != before {
+            self.schedule_flush();
+        }
         tracing::warn!("Account {} disabled: {}", account_id, reason);
     }
 
@@ -495,6 +667,7 @@ impl ClientManager {
         let evicted = before - self.session_map.len();
         if evicted > 0 {
             tracing::info!("Session affinity: evicted {} stale entries (>{:?})", evicted, max_age);
+            self.schedule_flush();
         }
     }
 
@@ -594,6 +767,38 @@ impl ClientManager {
         }
     }
 
+    /// Whether the account has a configured static proxy. Mirrors
+    /// `Account.static_proxy.is_some()` so the gateway hot path can resolve
+    /// `routeMode=static` against `has_static` without a per-request disk read.
+    pub fn has_static_proxy(&self, account_id: &str) -> bool {
+        self.runtime_state
+            .get(account_id)
+            .map(|r| r.has_static_proxy)
+            .unwrap_or(false)
+    }
+
+    pub fn set_has_static_proxy(&self, account_id: &str, has_static: bool) {
+        if let Some(mut rs) = self.runtime_state.get_mut(account_id) {
+            rs.has_static_proxy = has_static;
+        }
+    }
+
+    /// Pre-built static proxy URL for the account, when staticProxy is
+    /// configured. The gateway hot path uses this to dispatch routeMode=static
+    /// requests through `state.client.proxy(url)` directly, bypassing the
+    /// dynamic ProxyPool entirely (mirrors how Vercel/Direct routes work).
+    pub fn get_static_proxy_url(&self, account_id: &str) -> Option<String> {
+        self.runtime_state
+            .get(account_id)
+            .and_then(|r| r.static_proxy_url.clone())
+    }
+
+    pub fn set_static_proxy_url(&self, account_id: &str, url: Option<String>) {
+        if let Some(mut rs) = self.runtime_state.get_mut(account_id) {
+            rs.static_proxy_url = url;
+        }
+    }
+
     pub fn has_client(&self, account_id: &str) -> bool {
         self.clients.contains_key(account_id)
     }
@@ -667,8 +872,8 @@ mod tests {
                 "email": "{}",
                 "accountUuid": "{}",
                 "cli": {{
-                    "accessToken": "sk-ant-oat01-{}",
-                    "refreshToken": "sk-ant-ort01-{}",
+                    "accessToken": "stub-oat01-{}",
+                    "refreshToken": "stub-ort01-{}",
                     "expiresAt": 2000003600000,
                     "deviceId": "{:064x}"
                 }}
@@ -701,6 +906,90 @@ mod tests {
         ClientManager::new(bc)
     }
 
+    fn make_v3_account_static(account_id: &str, email: &str, host: &str, port: u16, user: &str, pass: &str) -> String {
+        format!(
+            r#"{{
+                "accountId": "{}",
+                "email": "{}",
+                "accountUuid": "{}",
+                "routeMode": "static",
+                "staticProxy": {{
+                    "protocol": "socks5",
+                    "host": "{}",
+                    "port": {},
+                    "username": "{}",
+                    "password": "{}"
+                }},
+                "cli": {{
+                    "accessToken": "stub-oat01-{}",
+                    "refreshToken": "stub-ort01-{}",
+                    "expiresAt": 2000003600000,
+                    "deviceId": "{:064x}"
+                }}
+            }}"#,
+            account_id, email, make_test_uuid(account_id),
+            host, port, user, pass,
+            account_id, account_id,
+            account_id.as_bytes().iter().fold(0u64, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u64))
+        )
+    }
+
+    // ── Static proxy URL cache ───────────────────────────────
+
+    #[test]
+    fn test_set_static_proxy_url_round_trip() {
+        // load_clients with non-static account → static_proxy_url cache None.
+        // set_static_proxy_url updates cache; get returns updated value.
+        let dir = TestDir::new();
+        write_file(&dir.path, "a1.json", &make_v3_account("a1", "a1@t.com"));
+        let cm = make_manager();
+        cm.load_clients(&dir.path).unwrap();
+
+        assert_eq!(cm.get_static_proxy_url("a1"), None);
+
+        cm.set_static_proxy_url("a1", Some("socks5://u:p@h.example:1080".to_string()));
+        assert_eq!(
+            cm.get_static_proxy_url("a1"),
+            Some("socks5://u:p@h.example:1080".to_string()),
+        );
+
+        cm.set_static_proxy_url("a1", None);
+        assert_eq!(cm.get_static_proxy_url("a1"), None);
+    }
+
+    #[test]
+    fn test_load_clients_populates_static_proxy_url_cache() {
+        // Account JSON with routeMode=static + staticProxy → load_clients
+        // pre-builds the static URL into RuntimeState.static_proxy_url so the
+        // gateway hot path can dispatch without a per-request disk read.
+        let dir = TestDir::new();
+        write_file(
+            &dir.path,
+            "a1.json",
+            &make_v3_account_static("a1", "a1@t.com", "203.0.113.10", 45001, "u", "p"),
+        );
+        let cm = make_manager();
+        cm.load_clients(&dir.path).unwrap();
+
+        assert_eq!(cm.has_static_proxy("a1"), true);
+        assert_eq!(
+            cm.get_static_proxy_url("a1"),
+            Some("socks5://u:p@203.0.113.10:45001".to_string()),
+        );
+    }
+
+    #[test]
+    fn test_load_clients_dynamic_account_static_url_is_none() {
+        // Account without staticProxy → static_proxy_url cache must stay None.
+        let dir = TestDir::new();
+        write_file(&dir.path, "a1.json", &make_v3_account("a1", "a1@t.com"));
+        let cm = make_manager();
+        cm.load_clients(&dir.path).unwrap();
+
+        assert_eq!(cm.has_static_proxy("a1"), false);
+        assert_eq!(cm.get_static_proxy_url("a1"), None);
+    }
+
     // ── Basic round-robin ────────────────────────────────────
 
     #[test]
@@ -712,7 +1001,7 @@ mod tests {
         assert_eq!(count, 1);
         let cli = cm.get_client_simple(&HashSet::new()).unwrap();
         assert_eq!(cli.account_id, "a1");
-        assert_eq!(cli.access_token, "sk-ant-oat01-a1");
+        assert_eq!(cli.access_token, "stub-oat01-a1");
     }
 
     #[test]
@@ -882,8 +1171,8 @@ mod tests {
                 "accountUuid": "{}",
                 "country": "{}",
                 "cli": {{
-                    "accessToken": "sk-ant-oat01-{}",
-                    "refreshToken": "sk-ant-ort01-{}",
+                    "accessToken": "stub-oat01-{}",
+                    "refreshToken": "stub-ort01-{}",
                     "expiresAt": 2000003600000,
                     "deviceId": "{:064x}"
                 }}
@@ -1017,5 +1306,110 @@ mod tests {
             organization_id: None,
             updated_at: 1000,
         }
+    }
+
+    // ── Session affinity persistence (sessions.json) ──────────────
+
+    fn temp_sessions_path() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "claude_ultra_sessions_test_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("sessions.json")
+    }
+
+    #[test]
+    fn load_sessions_missing_file_returns_empty() {
+        let path = std::env::temp_dir().join(format!(
+            "claude_ultra_sessions_missing_{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        assert!(!path.exists());
+        let map = ClientManager::load_sessions_from_disk(&path);
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn load_sessions_corrupt_file_returns_empty() {
+        let path = temp_sessions_path();
+        std::fs::write(&path, "not json").unwrap();
+        let map = ClientManager::load_sessions_from_disk(&path);
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn load_sessions_prunes_entries_older_than_ttl() {
+        let path = temp_sessions_path();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let fresh_ms = now_ms - 60_000;                    // 1 min ago, keep
+        let stale_ms = now_ms - SESSION_TTL_MS - 60_000;   // > 7d ago, prune
+        let records = vec![
+            SessionRecord {
+                sid: "fresh".into(),
+                aid: "acc1".into(),
+                last_used_ms: fresh_ms,
+            },
+            SessionRecord {
+                sid: "stale".into(),
+                aid: "acc2".into(),
+                last_used_ms: stale_ms,
+            },
+        ];
+        std::fs::write(&path, serde_json::to_string(&records).unwrap()).unwrap();
+        let map = ClientManager::load_sessions_from_disk(&path);
+        assert_eq!(map.len(), 1);
+        let v = map.get("fresh").unwrap();
+        assert_eq!(v.value().0, "acc1");
+        assert!(map.get("stale").is_none());
+    }
+
+    #[test]
+    fn flush_then_reload_roundtrip() {
+        let path = temp_sessions_path();
+        let bc = Arc::new(BoringClient::builder().build().unwrap());
+        let cm = ClientManager::new(bc).with_sessions_path(path.clone());
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        cm.session_map.insert("s1".into(), ("aid-A".into(), now_ms));
+        cm.session_map.insert("s2".into(), ("aid-B".into(), now_ms));
+        cm.flush_sessions_to_disk().unwrap();
+
+        // Drop and recreate; persisted entries must reappear.
+        drop(cm);
+        let bc2 = Arc::new(BoringClient::builder().build().unwrap());
+        let cm2 = ClientManager::new(bc2).with_sessions_path(path);
+        assert_eq!(cm2.session_map.len(), 2);
+        assert_eq!(cm2.session_map.get("s1").unwrap().value().0, "aid-A");
+        assert_eq!(cm2.session_map.get("s2").unwrap().value().0, "aid-B");
+    }
+
+    #[test]
+    fn flush_prunes_stale_entries_at_write() {
+        let path = temp_sessions_path();
+        let bc = Arc::new(BoringClient::builder().build().unwrap());
+        let cm = ClientManager::new(bc).with_sessions_path(path.clone());
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        cm.session_map.insert("fresh".into(), ("acc1".into(), now_ms));
+        cm.session_map.insert(
+            "stale".into(),
+            ("acc2".into(), now_ms - SESSION_TTL_MS - 60_000),
+        );
+        cm.flush_sessions_to_disk().unwrap();
+
+        // Re-read raw file: stale entry must be filtered out.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let records: Vec<SessionRecord> = serde_json::from_str(&content).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].sid, "fresh");
+    }
+
+    #[test]
+    fn with_sessions_path_none_disables_persistence() {
+        let bc = Arc::new(BoringClient::builder().build().unwrap());
+        let cm = ClientManager::new(bc);
+        // No path configured → flush is a no-op (Ok).
+        cm.flush_sessions_to_disk().unwrap();
+        // schedule_flush is a no-op too — does not panic with no listener.
+        cm.schedule_flush();
     }
 }

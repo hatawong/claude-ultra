@@ -30,6 +30,10 @@ export interface TaskDialogState {
   handleAbort: () => Promise<void>;
   handleClearLog: () => Promise<void>;
   resetForNewRun: () => Promise<void>;
+  /** Reset task UI state to idle without spawning a new run. Used by [Add Another]
+   * after a successful task to clear the lingering progress bar / log / status icon
+   * before the user starts the next attempt. */
+  resetToIdle: () => void;
   setError: (msg: string | null) => void;
 }
 
@@ -233,6 +237,21 @@ export function useTaskDialog({ taskId, ipc }: UseTaskDialogOptions): TaskDialog
     lastEventAtRef.current = 0;
   }, [taskId, ipcNames.getLog]);
 
+  const resetToIdle = useCallback(() => {
+    // Reset UI state to idle WITHOUT spawning a new run. Backend Task is
+    // unchanged (still in Done/Failed/Aborted state); next snapshot will
+    // re-apply, but by then user will have started the next run via
+    // handleStart and Rust's first snapshot will preempt with Running.
+    setStatus('idle');
+    setStep(0);
+    setTotalSteps(0);
+    setStepName('');
+    setErrorState(null);
+    setHasResult(false);
+    setLogContent('');
+    lastEventAtRef.current = 0;
+  }, []);
+
   const setError = useCallback((msg: string | null) => {
     setErrorState(msg);
     if (msg) setStatus('failed');
@@ -248,7 +267,7 @@ export function useTaskDialog({ taskId, ipc }: UseTaskDialogOptions): TaskDialog
   return {
     status, step, totalSteps, stepName, percent, error, hasResult,
     logContent, toast, logEndRef,
-    handlePauseResume, handleAbort, handleClearLog, resetForNewRun,
+    handlePauseResume, handleAbort, handleClearLog, resetForNewRun, resetToIdle,
     setError,
   };
 }

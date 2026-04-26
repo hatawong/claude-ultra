@@ -8,7 +8,7 @@ const OLD_GATEWAY_CONFIG: &str = "gateway_config.json";
 
 // ── AppConfig (top-level) ───────────────────────────────────────────
 
-/// Unified application configuration — stored at ~/.claude-ultra/config.json
+/// 统一应用配置 — 存储在 ~/.claude-ultra/config.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub sms: SmsConfig,
     #[serde(default)]
     pub registration: RegistrationConfig,
+    #[serde(default)]
+    pub android: AndroidConfig,
 }
 
 fn default_server_url() -> String { "https://api.claude-ultra.com".to_string() }
@@ -39,7 +41,46 @@ impl Default for AppConfig {
             email: EmailConfig::default(),
             sms: SmsConfig::default(),
             registration: RegistrationConfig::default(),
+            android: AndroidConfig::default(),
         }
+    }
+}
+
+// ── AndroidConfig ───────────────────────────────────────────────────
+// Android subproject-specific fields (appVersion for device fingerprinting,
+// conscrypt for TLS proxy URL). Previously lived in a separate
+// android/config.json; consolidated into the unified config.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AndroidConfig {
+    #[serde(default = "default_app_version", rename = "appVersion")]
+    pub app_version: String,
+    #[serde(default)]
+    pub conscrypt: ConscryptConfig,
+}
+
+fn default_app_version() -> String { "1.260402.20".to_string() }
+
+impl Default for AndroidConfig {
+    fn default() -> Self {
+        Self {
+            app_version: default_app_version(),
+            conscrypt: ConscryptConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConscryptConfig {
+    #[serde(default = "default_conscrypt_url")]
+    pub url: String,
+}
+
+fn default_conscrypt_url() -> String { "http://127.0.0.1:3456".to_string() }
+
+impl Default for ConscryptConfig {
+    fn default() -> Self {
+        Self { url: default_conscrypt_url() }
     }
 }
 
@@ -170,6 +211,8 @@ impl Default for GatewayConfig {
 pub struct ProxyConfig {
     #[serde(default = "default_proxy_type")]
     pub default_type: String,
+    #[serde(default = "default_country")]
+    pub default_country: String,
     #[serde(default)]
     pub residential: ResidentialProxyConfig,
     #[serde(default)]
@@ -177,11 +220,13 @@ pub struct ProxyConfig {
 }
 
 fn default_proxy_type() -> String { "residential".to_string() }
+fn default_country() -> String { "us".to_string() }
 
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
             default_type: default_proxy_type(),
+            default_country: default_country(),
             residential: ResidentialProxyConfig::default(),
             mobile: MobileProxyConfig::default(),
         }
@@ -190,6 +235,9 @@ impl Default for ProxyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResidentialProxyConfig {
+    /// Proxy provider type: "iproyal" or "ipfoxy". Dispatches URL format in build_proxy_url.
+    #[serde(default = "default_kind")]
+    pub kind: String,
     #[serde(default = "default_proxy_host")]
     pub host: String,
     #[serde(default = "default_proxy_port")]
@@ -198,22 +246,20 @@ pub struct ResidentialProxyConfig {
     pub username: String,
     #[serde(default)]
     pub password: String,
-    #[serde(default = "default_country")]
-    pub default_country: String,
 }
 
+fn default_kind() -> String { "iproyal".to_string() }
 fn default_proxy_host() -> String { "geo.iproyal.com".to_string() }
 fn default_proxy_port() -> u16 { 12321 }
-fn default_country() -> String { "us".to_string() }
 
 impl Default for ResidentialProxyConfig {
     fn default() -> Self {
         Self {
+            kind: default_kind(),
             host: default_proxy_host(),
             port: default_proxy_port(),
             username: String::new(),
             password: String::new(),
-            default_country: default_country(),
         }
     }
 }
@@ -512,6 +558,27 @@ mod tests {
     }
 
     #[test]
+    fn test_residential_proxy_kind_default() {
+        let cfg = ResidentialProxyConfig::default();
+        assert_eq!(cfg.kind, "iproyal");
+    }
+
+    #[test]
+    fn test_residential_proxy_kind_serde_default() {
+        // Legacy config (no kind) deserializes to "iproyal" (backward compat).
+        let json = r#"{"host":"geo.iproyal.com","port":12321,"username":"u","password":"p"}"#;
+        let cfg: ResidentialProxyConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.kind, "iproyal");
+    }
+
+    #[test]
+    fn test_residential_proxy_kind_ipfoxy_serde() {
+        let json = r#"{"kind":"ipfoxy","host":"gate.ipfoxy.io","port":58688,"username":"u","password":"p"}"#;
+        let cfg: ResidentialProxyConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.kind, "ipfoxy");
+    }
+
+    #[test]
     fn test_default_config() {
         let config = AppConfig::default();
         assert_eq!(config.ui.language, "en");
@@ -558,6 +625,7 @@ mod tests {
             },
             sms: SmsConfig { api_key: "sms_key".to_string() },
             registration: RegistrationConfig::default(),
+            android: AndroidConfig::default(),
         };
 
         let json = serde_json::to_string(&config).unwrap();

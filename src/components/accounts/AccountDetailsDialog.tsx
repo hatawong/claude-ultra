@@ -10,6 +10,8 @@ import {
 import { cn } from '../../utils/cn';
 import { QuotaDetail } from './QuotaDisplay';
 import { useConfigStore } from '../../stores/useConfigStore';
+import { PROXY_COUNTRIES } from '../../types/config';
+import StaticProxyEditPanel from './StaticProxyEditPanel';
 
 interface AccountDetailsDialogProps {
   account: Account;
@@ -411,8 +413,6 @@ function InfoRowCopyable({ label, value, onCopy }: { label: string; value: strin
   );
 }
 
-const PROXY_COUNTRIES = ['us', 'jp', 'kr', 'ph'];
-
 function RouteEditor({ account, onToast, onUpdated }: { account: Account; onToast: (msg: string) => void; onUpdated?: () => void }) {
   const { t } = useTranslation();
   const config = useConfigStore((s) => s.config);
@@ -425,23 +425,51 @@ function RouteEditor({ account, onToast, onUpdated }: { account: Account; onToas
   const [country, setCountry] = useState(currentCountry);
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => { setMode(currentMode); setCountry(currentCountry); }, [currentMode, currentCountry]);
+  useEffect(() => {
+    setMode(currentMode);
+    setCountry(currentCountry);
+  }, [currentMode, currentCountry]);
 
-  const handleSave = async (newMode: string, newCountry?: string) => {
+  const handleModeChange = async (newMode: string) => {
     setMode(newMode);
-    if (newCountry !== undefined) setCountry(newCountry);
+
+    // Switching to 'static' WITHOUT existing creds opens the editor and
+    // defers IPC: backend strict validation rejects route_mode='static' with
+    // empty staticProxy, so both fields must be written atomically via Save.
+    if (newMode === 'static' && !account.staticProxy) {
+      return;
+    }
+
     setSaving(true);
     try {
       await invoke('update_account_route', {
         accountId: account.accountId,
         routeMode: newMode,
-        ...(newMode === 'proxy' && newCountry !== undefined ? { routeCountry: newCountry } : {}),
+        ...(newMode === 'proxy' ? { routeCountry: country } : {}),
       });
       onToast(t('accounts.details.route_updated', 'Route updated'));
       onUpdated?.();
     } catch (e) {
       onToast(String(e));
       setMode(currentMode);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCountryChange = async (newCountry: string) => {
+    setCountry(newCountry);
+    setSaving(true);
+    try {
+      await invoke('update_account_route', {
+        accountId: account.accountId,
+        routeMode: mode,
+        routeCountry: newCountry,
+      });
+      onToast(t('accounts.details.route_updated', 'Route updated'));
+      onUpdated?.();
+    } catch (e) {
+      onToast(String(e));
       setCountry(currentCountry);
     } finally {
       setSaving(false);
@@ -449,34 +477,50 @@ function RouteEditor({ account, onToast, onUpdated }: { account: Account; onToas
   };
 
   return (
-    <div className="flex items-center gap-1.5">
-      <select
-        value={mode}
-        onChange={(e) => handleSave(e.target.value, country)}
-        disabled={saving}
-        className="text-xs bg-base-200 border border-base-300 rounded px-2 py-0.5 text-base-content focus:outline-none focus:ring-1 focus:ring-blue-500"
-      >
-        <option value="proxy" disabled={!proxyAvailable}>
-          {t('accounts.route.proxy', 'Proxy')}
-        </option>
-        <option value="vercel" disabled={!vercelAvailable}>
-          {t('accounts.route.vercel', 'Vercel')}
-        </option>
-        <option value="direct">
-          {t('accounts.route.direct', 'Direct')}
-        </option>
-      </select>
-      {mode === 'proxy' && (
+    <div className="flex flex-col gap-2">
+      {/* Top row: routeMode + country (proxy mode only) */}
+      <div className="flex items-center gap-1.5">
         <select
-          value={country}
-          onChange={(e) => handleSave(mode, e.target.value)}
+          value={mode}
+          onChange={(e) => handleModeChange(e.target.value)}
           disabled={saving}
-          className="text-xs bg-base-200 border border-base-300 rounded px-1.5 py-0.5 text-base-content focus:outline-none focus:ring-1 focus:ring-blue-500 w-16"
+          className="text-xs bg-base-200 border border-base-300 rounded px-2 py-0.5 text-base-content focus:outline-none focus:ring-1 focus:ring-blue-500"
         >
-          {PROXY_COUNTRIES.map((c) => (
-            <option key={c} value={c}>{c.toUpperCase()}</option>
-          ))}
+          <option value="proxy" disabled={!proxyAvailable}>Proxy</option>
+          <option value="static">Static</option>
+          <option value="vercel" disabled={!vercelAvailable}>Vercel</option>
+          <option value="direct">Direct</option>
         </select>
+        {mode === 'proxy' && (
+          <select
+            value={country}
+            onChange={(e) => handleCountryChange(e.target.value)}
+            disabled={saving}
+            className="text-xs bg-base-200 border border-base-300 rounded px-1.5 py-0.5 text-base-content focus:outline-none focus:ring-1 focus:ring-blue-500 w-16"
+          >
+            {PROXY_COUNTRIES.map((c) => (
+              <option key={c} value={c}>{c.toUpperCase()}</option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {/* Static proxy editor — shared with AddAccountDialog via Panel.
+          Existing creds remain on disk when switched to other modes by
+          design, but the editor is hidden so the UI reflects the current
+          routing mode unambiguously. */}
+      {mode === 'static' && (
+        <div className="p-2 bg-base-200/50 rounded border border-base-300">
+          <StaticProxyEditPanel
+            mode="edit"
+            accountId={account.accountId}
+            initialStaticProxy={account.staticProxy || null}
+            onSave={() => { /* Panel commits via update_account_route */ }}
+            onUpdated={onUpdated}
+            onToast={onToast}
+            saving={saving}
+          />
+        </div>
       )}
     </div>
   );

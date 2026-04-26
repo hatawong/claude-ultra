@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
-import type { Account, Utilization } from '../types/account';
+import type { Account, Utilization, StaticProxy, ProxyTestResult } from '../types/account';
 import {
   listAccounts,
   deleteAccount as deleteAccountApi,
@@ -20,6 +20,12 @@ interface AccountState {
   /** accountId for in-progress Add Account flow (survives dialog close + page navigation) */
   addingAccountId: string | null;
   setAddingAccountId: (id: string | null) => void;
+  /** staticProxy captured during in-progress Add flow (parent state) */
+  addingStaticProxy: StaticProxy | null;
+  setAddingStaticProxy: (sp: StaticProxy | null) => void;
+  /** Last test result for the in-progress Add flow's staticProxy */
+  addingTestResult: ProxyTestResult | null;
+  setAddingTestResult: (tr: ProxyTestResult | null) => void;
   fetchAccounts: () => Promise<void>;
   deleteAccount: (id: string) => Promise<void>;
   updateAccountLabel: (id: string, label: string) => Promise<void>;
@@ -41,6 +47,10 @@ export const useAccountStore = create<AccountState>((set, get) => ({
   refreshingQuota: new Set<string>(),
   addingAccountId: null,
   setAddingAccountId: (id) => set({ addingAccountId: id }),
+  addingStaticProxy: null,
+  setAddingStaticProxy: (sp) => set({ addingStaticProxy: sp }),
+  addingTestResult: null,
+  setAddingTestResult: (tr) => set({ addingTestResult: tr }),
 
   fetchAccounts: async () => {
     set({ loading: true, error: null });

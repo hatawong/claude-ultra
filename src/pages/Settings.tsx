@@ -1,15 +1,16 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Save, Github, User, MessageCircle, ExternalLink,
   RefreshCw, Heart, Send, LogOut, Key,
   LayoutDashboard, Users, Network, Activity,
-  BarChart3, Settings as SettingsIcon, Lock, CheckCircle2,
+  BarChart3, Settings as SettingsIcon, Lock, CheckCircle2, ChevronDown,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { useConfigStore } from '../stores/useConfigStore';
 import { useAuthStore } from '../stores/useAuthStore';
 import type { AppConfig } from '../types/config';
+import { PROXY_COUNTRIES } from '../types/config';
 import type { AuthUser } from '../types/auth';
 import { showToast } from '../components/common/Toast';
 import { enable as enableAutostart, disable as disableAutostart, isEnabled as isAutostartEnabled } from '@tauri-apps/plugin-autostart';
@@ -58,7 +59,7 @@ function Settings() {
     },
     server_url: 'http://localhost:8787',
     gateway: {} as any,
-    proxy: { default_type: 'residential', residential: { host: 'geo.iproyal.com', port: 12321, username: '', password: '', default_country: 'us' }, mobile: { username: '', password: '', host: '', http_port: 0, socks5_port: 0, rotate_url: '' } },
+    proxy: { default_type: 'residential', default_country: 'us', residential: { kind: 'iproyal', host: 'geo.iproyal.com', port: 12321, username: '', password: '' }, mobile: { username: '', password: '', host: '', http_port: 0, socks5_port: 0, rotate_url: '' } },
     email: { domains: [], mailslurp_api_key: '', mailslurp_inbox_id: '' },
     sms: { api_key: '' },
     registration: {
@@ -67,6 +68,7 @@ function Settings() {
         ph: { sms_max_price: 0.51 },
       },
     },
+    android: { appVersion: '1.260402.20', conscrypt: { url: 'http://127.0.0.1:3456' } },
   });
 
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
@@ -523,16 +525,40 @@ function ProxyTab({
   t: ReturnType<typeof useTranslation>['t'];
 }) {
   const [proxyForm, setProxyForm] = useState({
+    kind: (config?.proxy?.residential?.kind || 'iproyal') as 'iproyal' | 'ipfoxy',
     host: config?.proxy?.residential?.host || 'geo.iproyal.com',
     port: config?.proxy?.residential?.port || 12321,
     username: config?.proxy?.residential?.username || '',
     password: config?.proxy?.residential?.password || '',
-    default_country: config?.proxy?.residential?.default_country || 'us',
+    default_country: config?.proxy?.default_country || 'us',
   });
   const [testResult, setTestResult] = useState<{ ok: boolean; mode: string; ip?: string; country?: string; error?: string } | null>(null);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  // Sync proxyForm exactly ONCE on the first non-null config arrival.
+  // Rationale: useState initializer fires only at mount when config may still be
+  // null, so we need a one-shot effect to populate form once config arrives.
+  // We must NOT keep syncing on every config change — saveQuiet (called from
+  // handleTest) writes form values back to config, which re-renders ProxyTab
+  // and would clobber any in-flight user input typed during the test round-trip
+  // (e.g. user typing password while Test is running). Init-once + form-self-
+  // owned-after preserves user input.
+  const initializedRef = useRef(false);
+  useEffect(() => {
+    if (!initializedRef.current && config?.proxy) {
+      setProxyForm({
+        kind: (config.proxy.residential?.kind || 'iproyal') as 'iproyal' | 'ipfoxy',
+        host: config.proxy.residential?.host || 'geo.iproyal.com',
+        port: config.proxy.residential?.port || 12321,
+        username: config.proxy.residential?.username || '',
+        password: config.proxy.residential?.password || '',
+        default_country: config.proxy.default_country || 'us',
+      });
+      initializedRef.current = true;
+    }
+  }, [config]);
 
   const isConfigured = proxyForm.username.trim() !== '' && proxyForm.password.trim() !== '';
 
@@ -544,12 +570,14 @@ function ProxyTab({
         ...config,
         proxy: {
           ...config.proxy,
+          default_country: proxyForm.default_country,
           residential: {
+            ...config.proxy.residential,
+            kind: proxyForm.kind,
             host: proxyForm.host,
             port: proxyForm.port,
             username: proxyForm.username,
             password: proxyForm.password,
-            default_country: proxyForm.default_country,
           },
         },
       };
@@ -569,12 +597,14 @@ function ProxyTab({
       ...config,
       proxy: {
         ...config.proxy,
+        default_country: proxyForm.default_country,
         residential: {
+          ...config.proxy.residential,
+          kind: proxyForm.kind,
           host: proxyForm.host,
           port: proxyForm.port,
           username: proxyForm.username,
           password: proxyForm.password,
-          default_country: proxyForm.default_country,
         },
       },
     };
@@ -626,11 +656,73 @@ function ProxyTab({
         </h3>
         <div className="grid grid-cols-2 gap-3">
           <div>
+            <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">{t('proxy.kind.label', 'Provider')}</label>
+            <div className="relative">
+            <select
+              value={proxyForm.kind}
+              onChange={(e) => {
+                // Kind switch behavior:
+                //   - Switching back to the kind currently persisted in config → restore
+                //     config's full residential block (host/port/user/pass).
+                //   - Switching to a different provider → clear user/pass (force re-entry
+                //     so IPRoyal creds aren't accidentally posted to IPFoxy backend) and
+                //     reset host/port to the new provider's default endpoint.
+                const newKind = e.target.value as 'iproyal' | 'ipfoxy';
+                const configKind = (config?.proxy?.residential?.kind || 'iproyal') as 'iproyal' | 'ipfoxy';
+                if (newKind === configKind && config) {
+                  const r = config.proxy.residential;
+                  setProxyForm({
+                    ...proxyForm,
+                    kind: newKind,
+                    host: r.host || (newKind === 'ipfoxy' ? 'gate.ipfoxy.io' : 'geo.iproyal.com'),
+                    port: r.port || (newKind === 'ipfoxy' ? 58688 : 12321),
+                    username: r.username || '',
+                    password: r.password || '',
+                  });
+                } else {
+                  const defaults = newKind === 'ipfoxy'
+                    ? { host: 'gate.ipfoxy.io', port: 58688 }
+                    : { host: 'geo.iproyal.com', port: 12321 };
+                  setProxyForm({
+                    ...proxyForm,
+                    kind: newKind,
+                    host: defaults.host,
+                    port: defaults.port,
+                    username: '',
+                    password: '',
+                  });
+                }
+              }}
+              className="w-full appearance-none px-3 py-1.5 pr-8 bg-white dark:bg-base-100 text-xs border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="iproyal">{t('proxy.kind.iproyal', 'IPRoyal')}</option>
+              <option value="ipfoxy">{t('proxy.kind.ipfoxy', 'IPFoxy')}</option>
+            </select>
+            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">{t('proxy.country')}</label>
+            <div className="relative">
+            <select
+              value={proxyForm.default_country}
+              onChange={(e) => setProxyForm({ ...proxyForm, default_country: e.target.value })}
+              className="w-full appearance-none px-3 py-1.5 pr-8 bg-white dark:bg-base-100 text-xs border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              {PROXY_COUNTRIES.map((c) => (
+                <option key={c} value={c}>{c.toUpperCase()}</option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
+            </div>
+          </div>
+          <div>
             <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">{t('proxy.host')}</label>
             <input
               type="text"
               value={proxyForm.host}
               onChange={(e) => setProxyForm({ ...proxyForm, host: e.target.value })}
+              placeholder={proxyForm.kind === 'ipfoxy' ? 'gate.ipfoxy.io' : 'geo.iproyal.com'}
               className="w-full px-3 py-1.5 bg-white dark:bg-base-100 text-xs border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
@@ -640,6 +732,7 @@ function ProxyTab({
               type="number"
               value={proxyForm.port}
               onChange={(e) => setProxyForm({ ...proxyForm, port: parseInt(e.target.value) || 0 })}
+              placeholder={proxyForm.kind === 'ipfoxy' ? '58688' : '12321'}
               className="w-full px-3 py-1.5 bg-white dark:bg-base-100 text-xs border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
@@ -658,15 +751,6 @@ function ProxyTab({
               type="password"
               value={proxyForm.password}
               onChange={(e) => setProxyForm({ ...proxyForm, password: e.target.value })}
-              className="w-full px-3 py-1.5 bg-white dark:bg-base-100 text-xs border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
-          </div>
-          <div>
-            <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">{t('proxy.country')}</label>
-            <input
-              type="text"
-              value={proxyForm.default_country}
-              onChange={(e) => setProxyForm({ ...proxyForm, default_country: e.target.value })}
               className="w-full px-3 py-1.5 bg-white dark:bg-base-100 text-xs border border-gray-200 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>

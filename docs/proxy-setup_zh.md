@@ -20,8 +20,8 @@ Claude Ultra 支持住宅代理轮换，避免基于 IP 的速率限制。本指
 
 1. 在 IPRoyal 控制台，前往 **Residential Proxies → Setup**
 2. 你会看到：
-   - **Username**（用户名，如 `customer-xxxx`）
-   - **Password**（密码，一串长字符）
+   - **Username**
+   - **Password**
 3. 记下这些凭证，稍后填入 Claude Ultra
 
 ## 第 4 步：在 Claude Ultra 中配置
@@ -34,7 +34,7 @@ Claude Ultra 支持住宅代理轮换，避免基于 IP 的速率限制。本指
 |------|-----|
 | Host | `geo.iproyal.com`（默认值，无需修改） |
 | Port | `12321`（默认值，无需修改） |
-| Username | 你的 IPRoyal 用户名（如 `customer-xxxx`） |
+| Username | 你的 IPRoyal 用户名 |
 | Password | 你的 IPRoyal 密码 |
 | Country | `us`（默认）或任意[支持的国家代码](https://iproyal.com/locations/) |
 
@@ -46,28 +46,41 @@ Claude Ultra 支持住宅代理轮换，避免基于 IP 的速率限制。本指
 {
   "proxy": {
     "default_type": "residential",
+    "default_country": "us",
     "residential": {
+      "kind": "iproyal",
       "host": "geo.iproyal.com",
       "port": 12321,
-      "username": "customer-xxxx",
-      "password": "your_password_here",
-      "default_country": "us"
+      "username": "your_username_here",
+      "password": "your_password_here"
     }
   }
 }
 ```
 
+## Provider 选择
+
+`proxy.residential.kind`: `"iproyal"`（默认）或 `"ipfoxy"`。决定 URL 格式分派：
+- IPRoyal：参数在 password 段（下划线分隔），host=`geo.iproyal.com:12321`
+- IPFoxy：参数在 username 段（连字符分隔），host=`gate.ipfoxy.io:58688`
+
+通过 设置 → 代理 → Provider 下拉切换。
+
 ## 第 5 步：验证
 
-保存后，Claude Ultra 会通过 IPRoyal 住宅代理路由 API 请求。每个账号会话分配一个固定 IP（保持 24 小时），会话之间 IP 自动轮换。
+保存后，Claude Ultra 会通过住宅代理路由 API 请求。每个账号会话分配一个固定 IP，会话之间 IP 自动轮换。
+
+**各 Provider 粘性时长**：
+- IPRoyal: 每会话约 24 小时（通过 `_lifetime-Nh` URL 参数配置，manager 默认 24 小时）
+- IPFoxy: 每会话最长约 120 分钟，闲置 15 分钟后丢 IP（账号控制面板层级管理，无 URL 参数覆盖）
 
 可在 **流量日志** 中查看代理使用情况——代理列会显示分配的 IP。
 
 ## 工作原理
 
-- 每个 Claude 账号分配一个 **固定住宅 IP**，持续 24 小时
+- 每个 Claude 账号分配一个 **固定住宅 IP**（时长按 Provider 不同，见第 5 步）
 - 账号轮换时生成新的 session ID → 新 IP
-- 流量按 GB 计费，由 IPRoyal 收取（不是 Claude Ultra）
+- 流量由 Provider 计费（IPRoyal: 按 GB / IPFoxy: 按 IP-月或 GB 视套餐而定），不是 Claude Ultra
 - 如果代理凭证为空，Claude Ultra 直连（不使用代理）
 
 ## 支持的国家

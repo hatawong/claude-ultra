@@ -22,7 +22,11 @@ function Dashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [todayRequests, setTodayRequests] = useState(0);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
-  const { addingAccountId, setAddingAccountId } = useAccountStore();
+  const {
+    addingAccountId, setAddingAccountId,
+    addingStaticProxy, setAddingStaticProxy,
+    addingTestResult, setAddingTestResult,
+  } = useAccountStore();
   const [isRefreshConfirmOpen, setIsRefreshConfirmOpen] = useState(false);
   const [proxyMode, setProxyMode] = useState<string>('unknown');
 
@@ -197,7 +201,7 @@ function Dashboard() {
               }`}>
                 {stats.avgFiveHour < 50
                   ? t('dashboard.quota_sufficient', '✓ Quota sufficient')
-                  : t('dashboard.quota_low', '⚠ Quota low')}
+                  : t('dashboard.quota_low', '⚠️ Quota low')}
               </div>
             )}
           </div>
@@ -221,7 +225,7 @@ function Dashboard() {
               }`}>
                 {stats.avgSevenDay < 50
                   ? t('dashboard.quota_sufficient', '✓ Quota sufficient')
-                  : t('dashboard.quota_low', '⚠ Quota low')}
+                  : t('dashboard.quota_low', '⚠️ Quota low')}
               </div>
             )}
           </div>
@@ -288,6 +292,10 @@ function Dashboard() {
         <AddAccountDialog
           accountId={addingAccountId}
           onAccountIdChange={setAddingAccountId}
+          staticProxy={addingStaticProxy}
+          onStaticProxyChange={setAddingStaticProxy}
+          testResult={addingTestResult}
+          onTestResultChange={setAddingTestResult}
           onClose={() => setIsAddDialogOpen(false)}
           onToast={(msg: string) => showToast(msg)}
         />

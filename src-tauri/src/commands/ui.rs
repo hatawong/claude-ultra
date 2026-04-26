@@ -78,12 +78,108 @@ pub async fn sync_claude_settings(
     // Atomic write + 0600: settings.json contains ANTHROPIC_API_KEY
     crate::modules::secure_fs::secure_write_json(&path, &settings)?;
 
-    Ok("Claude Code settings synced.".to_string())
+    // Pre-approve the API key fingerprint and mark onboarding complete in
+    // ~/.claude.json so a freshly-installed Claude Code CLI starts directly
+    // into REPL: skips ApproveApiKey dialog (custom key prompt) and the
+    // welcome/onboarding flow. Merge mode preserves any pre-existing user
+    // state (theme, oauthAccount, recentProjects, etc).
+    //
+    // Failure here is non-fatal: settings.json is already written. Surface
+    // the partial-success state so the user can investigate.
+    match prepare_claude_json_for_gateway(&api_key) {
+        Ok(()) => Ok("Claude Code settings synced.".to_string()),
+        Err(e) => Ok(format!(
+            "Claude Code settings.json synced; ~/.claude.json pre-approve failed: {}. \
+             First-run ApproveApiKey dialog may still appear in CC CLI.",
+            e,
+        )),
+    }
 }
 
 fn get_claude_settings_path() -> Result<std::path::PathBuf, String> {
     let home = dirs::home_dir().ok_or("Cannot find home directory")?;
     Ok(home.join(".claude").join("settings.json"))
+}
+
+fn get_claude_json_path() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Cannot find home directory")?;
+    Ok(home.join(".claude.json"))
+}
+
+/// CC's fingerprint convention — last 20 chars of the API key.
+/// `api_key.len()` is byte count; slicing by byte index would panic when the
+/// last 20 bytes start mid–UTF-8 sequence. Iterate by char so non-ASCII
+/// inputs (paste accident, emoji) cannot crash the IPC command.
+fn api_key_fingerprint(api_key: &str) -> String {
+    let chars: Vec<char> = api_key.chars().collect();
+    if chars.len() <= 20 {
+        return api_key.to_string();
+    }
+    chars[chars.len() - 20..].iter().collect()
+}
+
+/// Pure merger: set hasCompletedOnboarding=true and ensure fingerprint is
+/// in customApiKeyResponses.approved. Never touches oauthAccount or other
+/// fields. Returns Err only when the existing JSON has a wrong shape (root
+/// not object, customApiKeyResponses not object, approved not array) —
+/// callers should treat as fatal and not silently reset.
+fn apply_claude_json_pre_approve(
+    json: &mut serde_json::Value,
+    fingerprint: &str,
+) -> Result<(), String> {
+    let obj = json
+        .as_object_mut()
+        .ok_or("~/.claude.json root is not an object")?;
+
+    obj.insert("hasCompletedOnboarding".to_string(), serde_json::json!(true));
+
+    let responses = obj
+        .entry("customApiKeyResponses")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or("customApiKeyResponses is not an object")?;
+    let approved = responses
+        .entry("approved")
+        .or_insert_with(|| serde_json::json!([]))
+        .as_array_mut()
+        .ok_or("customApiKeyResponses.approved is not an array")?;
+    if !approved.iter().any(|v| v.as_str() == Some(fingerprint)) {
+        approved.push(serde_json::json!(fingerprint));
+    }
+    Ok(())
+}
+
+/// Ensure ~/.claude.json contains hasCompletedOnboarding=true and the API
+/// key's last-20-char fingerprint in customApiKeyResponses.approved.
+///
+/// Strict merge mode:
+/// - Refuses to overwrite a corrupted file (parse error → Err); the user
+///   may have repairable state (oauthAccount, OAuth tokens via
+///   secureStorage, etc.) that a silent reset would invalidate.
+/// - Never touches oauthAccount, theme, recentProjects or any other field.
+/// - approved is append-only with dedup; the array may already contain
+///   fingerprints from prior keys or from the CC ApproveApiKey dialog.
+fn prepare_claude_json_for_gateway(api_key: &str) -> Result<(), String> {
+    let path = get_claude_json_path()?;
+
+    let mut json: serde_json::Value = if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("read {}: {}", path.display(), e))?;
+        serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "parse {}: {} (fix manually or delete to reset)",
+                path.display(),
+                e,
+            )
+        })?
+    } else {
+        serde_json::json!({})
+    };
+
+    apply_claude_json_pre_approve(&mut json, &api_key_fingerprint(api_key))?;
+
+    crate::modules::secure_fs::secure_write_json(&path, &json)?;
+    Ok(())
 }
 
 /// Sync Claude Code settings.json env for transparent audit mode.
@@ -266,5 +362,96 @@ mod tests {
         merge_restore_env(&mut settings).unwrap();
         let env = settings["env"].as_object().unwrap();
         assert!(env.is_empty());
+    }
+
+    // ── ~/.claude.json pre-approve helpers ──────────────────────
+
+    #[test]
+    fn fingerprint_takes_last_20_chars() {
+        let fp = api_key_fingerprint("sk-ultra-deadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(fp, "beefdeadbeefdeadbeef");
+    }
+
+    #[test]
+    fn fingerprint_short_key_returns_full() {
+        assert_eq!(api_key_fingerprint("short"), "short");
+    }
+
+    #[test]
+    fn fingerprint_non_ascii_does_not_panic() {
+        // Multi-byte chars in the trailing window must not panic the IPC.
+        // The exact tail content is not asserted (CC's slice(-20) is in JS
+        // chars and inputs are ASCII in practice); only the no-panic
+        // contract matters here.
+        let key: String = "x".repeat(10) + &"中".repeat(15);
+        let fp = api_key_fingerprint(&key);
+        assert_eq!(fp.chars().count(), 20);
+    }
+
+    #[test]
+    fn pre_approve_writes_to_empty_json() {
+        let mut j = json!({});
+        apply_claude_json_pre_approve(&mut j, "abc123").unwrap();
+        assert_eq!(j["hasCompletedOnboarding"], json!(true));
+        assert_eq!(j["customApiKeyResponses"]["approved"], json!(["abc123"]));
+    }
+
+    #[test]
+    fn pre_approve_preserves_oauth_account_and_other_state() {
+        let mut j = json!({
+            "theme": "dark",
+            "numStartups": 42,
+            "oauthAccount": {
+                "accountUuid": "uuid-keep",
+                "emailAddress": "user@x.com",
+            },
+            "recentProjects": ["/a", "/b"],
+            "hasCompletedOnboarding": true,
+        });
+        apply_claude_json_pre_approve(&mut j, "fp").unwrap();
+        assert_eq!(j["theme"], "dark");
+        assert_eq!(j["numStartups"], 42);
+        assert_eq!(j["oauthAccount"]["accountUuid"], "uuid-keep");
+        assert_eq!(j["oauthAccount"]["emailAddress"], "user@x.com");
+        assert_eq!(j["recentProjects"], json!(["/a", "/b"]));
+        assert_eq!(j["hasCompletedOnboarding"], true);
+        assert_eq!(j["customApiKeyResponses"]["approved"], json!(["fp"]));
+    }
+
+    #[test]
+    fn pre_approve_dedup_appends_when_missing_keeps_others() {
+        let mut j = json!({
+            "customApiKeyResponses": {
+                "approved": ["existing1", "existing2"],
+                "rejected": ["bad-fp"],
+            },
+        });
+        apply_claude_json_pre_approve(&mut j, "newfp").unwrap();
+        assert_eq!(
+            j["customApiKeyResponses"]["approved"],
+            json!(["existing1", "existing2", "newfp"]),
+        );
+        assert_eq!(j["customApiKeyResponses"]["rejected"], json!(["bad-fp"]));
+    }
+
+    #[test]
+    fn pre_approve_dedup_skips_when_present() {
+        let mut j = json!({
+            "customApiKeyResponses": {
+                "approved": ["alreadyhere"],
+            },
+        });
+        apply_claude_json_pre_approve(&mut j, "alreadyhere").unwrap();
+        assert_eq!(
+            j["customApiKeyResponses"]["approved"],
+            json!(["alreadyhere"]),
+        );
+    }
+
+    #[test]
+    fn pre_approve_rejects_non_object_root() {
+        let mut j = json!([1, 2, 3]);
+        let err = apply_claude_json_pre_approve(&mut j, "fp").unwrap_err();
+        assert!(err.contains("not an object"));
     }
 }

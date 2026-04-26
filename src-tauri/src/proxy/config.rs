@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-/// Proxy provider configuration (IPRoyal credentials + defaults).
+/// Proxy provider credentials + defaults. `kind` discriminates IPRoyal / IPFoxy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyProviderConfig {
+    /// Proxy provider type: "iproyal" or "ipfoxy". Dispatches URL format in build_proxy_url.
+    #[serde(default = "default_kind")]
+    pub kind: String,
     #[serde(default = "default_proxy_host")]
     pub host: String,
     #[serde(default = "default_proxy_port")]
@@ -17,6 +20,9 @@ pub struct ProxyProviderConfig {
     pub max_allocate_retries: u32,
 }
 
+fn default_kind() -> String {
+    "iproyal".to_string()
+}
 fn default_proxy_host() -> String {
     "geo.iproyal.com".to_string()
 }
@@ -33,6 +39,7 @@ fn default_max_allocate_retries() -> u32 {
 impl Default for ProxyProviderConfig {
     fn default() -> Self {
         Self {
+            kind: default_kind(),
             host: default_proxy_host(),
             port: default_proxy_port(),
             username: String::new(),

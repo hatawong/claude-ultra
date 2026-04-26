@@ -377,9 +377,17 @@ impl SubprocessManager {
                                 // Proxy
                                 if let Some(proxy_val) = data.get("proxy") {
                                     if !proxy_val.is_null() {
-                                        if let Ok(ps) = serde_json::from_value::<crate::models::account::ProxySection>(proxy_val.clone()) {
-                                            if let Err(e) = acct_mgr.set_proxy(&account_id_stdout, Some(ps)).await {
-                                                tracing::error!("[subprocess:{}] result set_proxy failed: {}", task_id_stdout, e);
+                                        match serde_json::from_value::<crate::models::account::ProxySection>(proxy_val.clone()) {
+                                            Ok(ps) => {
+                                                if let Err(e) = acct_mgr.set_proxy(&account_id_stdout, Some(ps)).await {
+                                                    tracing::error!("[subprocess:{}] result set_proxy failed: {}", task_id_stdout, e);
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    "[subprocess:{}] result.proxy failed to deserialize as ProxySection (skipping set_proxy): {} — payload={}",
+                                                    task_id_stdout, e, proxy_val,
+                                                );
                                             }
                                         }
                                     }
@@ -836,13 +844,13 @@ mod tests {
 
     #[test]
     fn test_parse_result_success() {
-        let json = r#"{"type":"result","success":true,"data":{"accessToken":"sk-ant-oat01-test","refreshToken":"sk-ant-ort01-test","expiresAt":1775516162349,"scopes":"user:inference user:profile"}}"#;
+        let json = r#"{"type":"result","success":true,"data":{"accessToken":"stub-oat01-test","refreshToken":"stub-ort01-test","expiresAt":1775516162349,"scopes":"user:inference user:profile"}}"#;
         let msg: StdoutMessage = serde_json::from_str(json).unwrap();
         match msg {
             StdoutMessage::Result { success, data } => {
                 assert!(success);
-                assert_eq!(data["accessToken"], "sk-ant-oat01-test");
-                assert_eq!(data["refreshToken"], "sk-ant-ort01-test");
+                assert_eq!(data["accessToken"], "stub-oat01-test");
+                assert_eq!(data["refreshToken"], "stub-ort01-test");
                 assert_eq!(data["expiresAt"], 1775516162349_i64);
             }
             _ => panic!("Expected Result message"),
@@ -898,8 +906,8 @@ mod tests {
         let mgr = AccountManager::new(dir.clone());
 
         let data = serde_json::json!({
-            "accessToken": "sk-ant-oat01-test-token",
-            "refreshToken": "sk-ant-ort01-test-refresh",
+            "accessToken": "stub-oat01-test-token",
+            "refreshToken": "stub-ort01-test-refresh",
             "expiresAt": 2000000000000_i64,
             "scopes": "user:inference user:profile user:sessions:claude_code",
         });
@@ -911,8 +919,8 @@ mod tests {
         // Verify CLI was written
         let account = mgr.read("test_oauth").await.unwrap();
         let cli = account.cli.unwrap();
-        assert_eq!(cli.access_token, "sk-ant-oat01-test-token");
-        assert_eq!(cli.refresh_token, "sk-ant-ort01-test-refresh");
+        assert_eq!(cli.access_token, "stub-oat01-test-token");
+        assert_eq!(cli.refresh_token, "stub-ort01-test-refresh");
         assert_eq!(cli.expires_at, 2000000000000);
         assert_eq!(cli.scopes.len(), 3);
         assert!(cli.last_activity.is_some());
@@ -936,7 +944,7 @@ mod tests {
 
         let data = serde_json::json!({
             "accessToken": "",
-            "refreshToken": "sk-ant-ort01-test",
+            "refreshToken": "stub-ort01-test",
             "expiresAt": 0,
         });
 
@@ -962,8 +970,8 @@ mod tests {
 
         // No scopes field → should use default 5 scopes
         let data = serde_json::json!({
-            "accessToken": "sk-ant-oat01-valid",
-            "refreshToken": "sk-ant-ort01-valid",
+            "accessToken": "stub-oat01-valid",
+            "refreshToken": "stub-ort01-valid",
             "expiresAt": 2000000000000_i64,
         });
 

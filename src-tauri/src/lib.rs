@@ -55,15 +55,18 @@ pub struct GatewayServiceState {
     pub proxy_mode: ProxyMode,
 }
 
-/// Build ProxyProviderConfig from AppConfig's proxy.residential section.
-fn proxy_provider_config_from(app_config: &AppConfig) -> ProxyProviderConfig {
+/// Build ProxyProviderConfig from AppConfig.
+/// Credentials (kind/username/password/host/port) come from proxy.residential,
+/// while default_country reads top-level proxy.default_country (unified field, same level as default_type).
+pub fn proxy_provider_config_from(app_config: &AppConfig) -> ProxyProviderConfig {
     let r = &app_config.proxy.residential;
     ProxyProviderConfig {
+        kind: r.kind.clone(),
         username: r.username.clone(),
         password: r.password.clone(),
         host: r.host.clone(),
         port: r.port,
-        default_country: r.default_country.clone(),
+        default_country: app_config.proxy.default_country.clone(),
         max_allocate_retries: 3,
     }
 }
@@ -79,8 +82,8 @@ impl GatewayServiceState {
             home.join(".claude-ultra").join("accounts")
         });
 
-        // NOTE: Legacy `region` → `country` migration removed in round 42
-        // (no live users; existing JSON cleaned manually with `jq 'del(.region)'`).
+        // NOTE: Legacy `region` → `country` migration removed (no live users
+        // carry it; existing JSON cleaned manually via `jq 'del(.region)'`).
 
         let account_manager = Arc::new(AccountManager::new(accounts_dir));
         let provider_config = Arc::new(proxy_provider_config_from(app_config));
@@ -106,7 +109,19 @@ impl GatewayServiceState {
                 .expect("Failed to build BoringClient"),
         );
 
-        let client_manager = Arc::new(ClientManager::new(boring_client.clone()));
+        // session affinity persistence — load existing sticky sessions
+        // (with TTL prune) so a restart does not roam active sessions.
+        // start_flush_task is deferred to init_services_inner (async ctx)
+        // since it spawns a tokio task.
+        let sessions_path = dirs::home_dir()
+            .map(|h| h.join(".claude-ultra").join("sessions.json"));
+        let client_manager = {
+            let mut cm = ClientManager::new(boring_client.clone());
+            if let Some(p) = sessions_path {
+                cm = cm.with_sessions_path(p);
+            }
+            Arc::new(cm)
+        };
 
         // ProxyPool: app-level singleton, same lifetime as GatewayServiceState
         let cancel_token = tokio_util::sync::CancellationToken::new();
@@ -255,6 +270,12 @@ pub async fn init_services_inner(handle: &tauri::AppHandle) -> Result<(), String
     }
 
     let accounts_dir = state.account_manager.accounts_dir().to_path_buf();
+
+    // session affinity persistence — debounced flush task (needs tokio
+    // runtime). Lives across all proxy modes since session_map is mode-
+    // independent.
+    state.client_manager.start_flush_task();
+    tracing::info!("ClientManager session-affinity flush task started");
 
     // ProxyPool + network check only in Proxied mode
     if state.proxy_mode == ProxyMode::Proxied {
@@ -617,6 +638,8 @@ pub fn run() {
             commands::auth::shutdown_services,
             // Proxy
             commands::proxy::test_proxy_connection,
+            commands::static_proxy::test_static_proxy_connection,
+            commands::static_proxy::test_static_proxy_dryrun,
             commands::proxy::get_proxy_mode,
             // UI
             commands::ui::show_main_window,
@@ -743,11 +766,11 @@ mod tests {
         let test_config = AppConfig::default();
         let state = GatewayServiceState::new(gateway_db, &test_config);
 
-        // ── Phase 1: Initial state ──
+        // ── Stage 1: Initial state ──
         assert!(!state.services_initialized.load(Ordering::SeqCst));
         assert!(state.account_monitor.read().await.is_none());
 
-        // ── Phase 2: Simulate init (AtomicBool guard) ──
+        // ── Stage 2: Simulate init (AtomicBool guard) ──
         let was_init = state.services_initialized.swap(true, Ordering::SeqCst);
         assert!(!was_init, "first init should succeed");
 
@@ -768,11 +791,11 @@ mod tests {
         *state.account_monitor.write().await = Some(monitor);
         assert!(state.account_monitor.read().await.is_some());
 
-        // ── Phase 3: Idempotent init — second call is no-op ──
+        // ── Stage 3: Idempotent init — second call is no-op ──
         let was_init_again = state.services_initialized.swap(true, Ordering::SeqCst);
         assert!(was_init_again, "second init should be rejected (already initialized)");
 
-        // ── Phase 4: Shutdown ──
+        // ── Stage 4: Shutdown ──
         // Stop Gateway (None in test, so nothing to do)
         {
             let mut instance = state.instance.write().await;
@@ -799,7 +822,7 @@ mod tests {
         state.services_initialized.store(false, Ordering::SeqCst);
         assert!(!state.services_initialized.load(Ordering::SeqCst));
 
-        // ── Phase 5: Re-init after shutdown ──
+        // ── Stage 5: Re-init after shutdown ──
         let was_init_third = state.services_initialized.swap(true, Ordering::SeqCst);
         assert!(!was_init_third, "re-init after shutdown should succeed");
 

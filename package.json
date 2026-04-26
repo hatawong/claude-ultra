@@ -1,7 +1,7 @@
 {
   "name": "claude-ultra-manager",
   "private": true,
-  "version": "1.4.119",
+  "version": "1.5.119",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,9 @@
     "tauri:dev": "tauri dev",
     "tauri:dev:internal": "tauri dev --features internal",
     "tauri:build": "tauri build",
-    "tauri:build:internal": "tauri build --features internal"
+    "tauri:build:internal": "tauri build --features internal",
+    "check-i18n": "bash scripts/check-i18n.sh",
+    "check-i18n:strict": "bash scripts/check-i18n.sh --strict"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
